@@ -67,31 +67,47 @@ async function getLatestTelemetry(host) {
 }
 
 /**
- * Retrieve the full telemetry history for a host, optionally filtered by service name.
- * When a service filter is provided, returns only records where that service existed
- * (to show its health state changes over time).
+ * Retrieve the full telemetry history for a host, optionally filtered by time range.
+ * When start/end times are provided, returns only records within that window.
  */
-async function getHostHistory(host, serviceFilter) {
+async function getHostHistory(host, startTime, endTime) {
   let query;
   let values;
 
-  if (serviceFilter) {
-    // Filter for records where the specified service name exists in the JSONB array
+  if (startTime && endTime) {
     query = `
       SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
       FROM telemetry
-      WHERE host = $1 AND services @> $2::jsonb
+      WHERE host = $1 AND timestamp >= $2 AND timestamp <= $3
       ORDER BY timestamp DESC
-      LIMIT 200
+      LIMIT 500
     `;
-    values = [host, JSON.stringify([{ name: serviceFilter }])];
+    values = [host, startTime, endTime];
+  } else if (startTime) {
+    query = `
+      SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
+      FROM telemetry
+      WHERE host = $1 AND timestamp >= $2
+      ORDER BY timestamp DESC
+      LIMIT 500
+    `;
+    values = [host, startTime];
+  } else if (endTime) {
+    query = `
+      SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
+      FROM telemetry
+      WHERE host = $1 AND timestamp <= $2
+      ORDER BY timestamp DESC
+      LIMIT 500
+    `;
+    values = [host, endTime];
   } else {
     query = `
       SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
       FROM telemetry
       WHERE host = $1
       ORDER BY timestamp DESC
-      LIMIT 200
+      LIMIT 500
     `;
     values = [host];
   }

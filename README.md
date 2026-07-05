@@ -84,6 +84,8 @@ curl http://localhost:3000/host/api-02
 | `GET` | `/health` | Liveness probe (used by Docker HEALTHCHECK) |
 | `GET` | `/dashboard` | HTML fleet health dashboard (human-readable view, live via SSE) |
 | `GET` | `/events/fleet` | SSE stream for real-time fleet updates (consumed by dashboard) |
+| `GET` | `/host/:id/history` | JSON telemetry history for a host, optional `?start=` & `?end=` time filter |
+| `GET` | `/host/:id/logs` | HTML timeline view for a host with time range picker |
 
 See [vibe/API_REFERENCE.md](vibe/API_REFERENCE.md) for full schema and examples.
 

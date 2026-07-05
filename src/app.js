@@ -71,12 +71,13 @@ app.get('/fleet', async (req, res) => {
 // Host History — GET /host/:id/history (JSON)
 // ---------------------------------------------------------------------------
 // Query params:
-//   ?service=nginx   — filter records to only those containing the named service
+//   ?start=2026-07-04T00:00:00Z&end=2026-07-05T23:59:59Z  — filter by time range
 // ---------------------------------------------------------------------------
 app.get('/host/:id/history', async (req, res) => {
   try {
     const hostId = req.params.id;
-    const serviceFilter = req.query.service || null;
+    const startTime = req.query.start || null;
+    const endTime = req.query.end || null;
 
     // Check host exists
     const latest = await db.getLatestTelemetry(hostId);
@@ -85,7 +86,7 @@ app.get('/host/:id/history', async (req, res) => {
     }
 
     const [history, events] = await Promise.all([
-      db.getHostHistory(hostId, serviceFilter),
+      db.getHostHistory(hostId, startTime, endTime),
       db.getHostEvents(hostId)
     ]);
 
@@ -96,7 +97,8 @@ app.get('/host/:id/history', async (req, res) => {
         latest,
         history,
         events,
-        filter: serviceFilter
+        start: startTime,
+        end: endTime
       }
     });
   } catch (err) {
@@ -111,7 +113,8 @@ app.get('/host/:id/history', async (req, res) => {
 app.get('/host/:id/logs', async (req, res) => {
   try {
     const hostId = req.params.id;
-    const serviceFilter = req.query.service || '';
+    const startTime = req.query.start || '';
+    const endTime = req.query.end || '';
 
     const latest = await db.getLatestTelemetry(hostId);
     if (!latest) {
@@ -119,14 +122,9 @@ app.get('/host/:id/logs', async (req, res) => {
     }
 
     const [history, events] = await Promise.all([
-      db.getHostHistory(hostId, serviceFilter || null),
+      db.getHostHistory(hostId, startTime || null, endTime || null),
       db.getHostEvents(hostId)
     ]);
-
-    // Build a unique list of service names for the filter dropdown
-    const allServiceNames = new Set();
-    history.forEach(r => (r.services || []).forEach(s => allServiceNames.add(s.name)));
-    const serviceNames = [...allServiceNames].sort();
 
     const hostHealthy = latest.healthy;
     const healthBadge = hostHealthy
@@ -183,11 +181,6 @@ app.get('/host/:id/logs', async (req, res) => {
       ? timeline.map(t => t.html).join('\n')
       : '<div class="empty">No telemetry or event data for this host yet.</div>';
 
-    // Filter dropdown options
-    const filterOptions = serviceNames.map(n =>
-      `<option value="${n}"${n === serviceFilter ? ' selected' : ''}>${n}</option>`
-    ).join('');
-
     const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -223,18 +216,25 @@ app.get('/host/:id/logs', async (req, res) => {
     .badge-ok { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
     .badge-fail { color: #ef4444; background: rgba(239, 68, 68, 0.15); }
     .controls {
-      display: flex; align-items: center; gap: 0.75rem;
+      display: flex; align-items: center; gap: 0.5rem;
       margin-bottom: 1.5rem; flex-wrap: wrap;
     }
     .controls label { font-size: 0.85rem; color: #94a3b8; }
-    .controls select {
+    .controls input[type="datetime-local"] {
       background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
-      padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.85rem;
+      padding: 0.4rem 0.5rem; border-radius: 6px; font-size: 0.85rem;
     }
-    .controls .count { font-size: 0.85rem; color: #64748b; }
-    .timeline {
-      display: flex; flex-direction: column; gap: 0.5rem;
+    .controls .btn {
+      background: #1e293b; color: #38bdf8; border: 1px solid #334155;
+      padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer;
+      font-size: 0.85rem; transition: background 0.2s;
     }
+    .controls .btn:hover { background: #334155; }
+    .controls .btn-primary {
+      background: #0ea5e9; color: #fff; border: 1px solid #0ea5e9;
+    }
+    .controls .btn-primary:hover { background: #0284c7; }
+    .controls .count { font-size: 0.85rem; color: #64748b; margin-left: auto; }
     .tl-entry {
       background: #1e293b; border-radius: 8px; padding: 0.75rem 1rem;
       border-left: 3px solid #334155;
@@ -307,11 +307,12 @@ app.get('/host/:id/logs', async (req, res) => {
     </header>
 
     <div class="controls">
-      <label for="serviceFilter">Filter by service:</label>
-      <select id="serviceFilter" onchange="applyFilter()">
-        <option value="">All services</option>
-        ${filterOptions}
-      </select>
+      <label for="startTime">From:</label>
+      <input type="datetime-local" id="startTime" value="${startTime ? startTime.substring(0,16) : ''}">
+      <label for="endTime">To:</label>
+      <input type="datetime-local" id="endTime" value="${endTime ? endTime.substring(0,16) : ''}">
+      <button class="btn btn-primary" onclick="applyTimeFilter()">Apply</button>
+      <button class="btn" onclick="clearFilter()">Clear</button>
       <span class="count">${timeline.length} record${timeline.length !== 1 ? 's' : ''}</span>
     </div>
 
@@ -321,18 +322,20 @@ app.get('/host/:id/logs', async (req, res) => {
   </div>
 
   <script>
-    function applyFilter() {
-      const service = document.getElementById('serviceFilter').value;
+    function applyTimeFilter() {
+      const start = document.getElementById('startTime').value;
+      const end = document.getElementById('endTime').value;
       const base = window.location.pathname;
-      const params = service ? '?service=' + encodeURIComponent(service) : '';
-      window.location.href = base + params;
+      const params = [];
+      if (start) params.push('start=' + encodeURIComponent(start + ':00Z'));
+      if (end) params.push('end=' + encodeURIComponent(end + ':59Z'));
+      window.location.href = base + (params.length ? '?' + params.join('&') : '');
     }
-
-    // Auto-refresh every 5 seconds via SSE or simple polling
-    // For now, lightweight polling is more reliable across browsers
-    setTimeout(function() {
-      window.location.reload();
-    }, 30000); // Refresh page every 30s to show new data
+    function clearFilter() {
+      window.location.href = window.location.pathname;
+    }
+    // Auto-refresh every 30s
+    setTimeout(function() { window.location.reload(); }, 30000);
   </script>
 </body>
 </html>`;
@@ -485,7 +488,10 @@ app.get('/dashboard', async (_req, res) => {
     }
     .badge-ok { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
     .badge-fail { color: #ef4444; background: rgba(239, 68, 68, 0.15); }
-    .cell-host { font-weight: 600; color: #e2e8f0; }
+        .cell-host { font-weight: 600; color: #e2e8f0; }
+        .cell-host a:hover { color: #38bdf8 !important; text-decoration: underline !important; }
+        .host-arrow { color: #38bdf8; margin-left: 4px; font-size: 0.75rem; opacity: 0; transition: opacity 0.2s; }
+        .cell-host:hover .host-arrow { opacity: 1; }
     .cell-num { font-variant-numeric: tabular-nums; color: #cbd5e1; }
     .cell-ip { font-family: 'JetBrains Mono', 'Cascadia Code', monospace; color: #94a3b8; font-size: 0.85rem; }
     .cell-ts { color: #64748b; font-size: 0.85rem; }
@@ -594,7 +600,7 @@ app.get('/dashboard', async (_req, res) => {
         const cpu = r.cpu_load != null ? r.cpu_load.toFixed(2) : '\\u2014';
         const mem = r.mem_used_mb != null ? Number(r.mem_used_mb).toLocaleString() + ' MB' : '\\u2014';
         const ip = r.ip || '\\u2014';
-        const hostLink = '<a href="/host/' + encodeURIComponent(r.host) + '/logs" style="color:inherit;text-decoration:none;">' + escapeHtml(r.host) + '</a>';
+        const hostLink = '<a href="/host/' + encodeURIComponent(r.host) + '/logs" style="color:inherit;text-decoration:none;">' + escapeHtml(r.host) + ' <span class="host-arrow">\u2197</span></a>';
 
         return '<tr class="' + rowClass + '">' +
           '<td class="cell-host">' + hostLink + '</td>' +
@@ -642,7 +648,7 @@ function renderRows(rows) {
 
     const ts = r.timestamp ? new Date(r.timestamp).toLocaleString() : '—';
 
-    const hostLink = `<a href="/host/${encodeURIComponent(r.host)}/logs" style="color:inherit;text-decoration:none;">${r.host}</a>`;
+    const hostLink = `<a href="/host/${encodeURIComponent(r.host)}/logs" style="color:inherit;text-decoration:none;">${r.host} <span class="host-arrow">↗</span></a>`;
 
     return `<tr class="${rowClass}">
         <td class="cell-host">${hostLink}</td>

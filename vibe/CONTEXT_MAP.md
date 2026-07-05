@@ -50,6 +50,16 @@ Concepts are grouped by category. Each entry includes:
 | `src/app.js` | 60-68 | `app.get('/fleet', ...)` | Route handler: query all hosts summary → 200/500 |
 | `src/app.js` | 62 | `db.getAllHostsSummary()` | Fetch latest per host with computed health |
 
+### GET /host/:id/history — Host Telemetry History (JSON)
+| File | Lines | Key Symbols | What |
+|---|---|---|---|
+| `src/app.js` | 76-106 | `app.get('/host/:id/history', ...)` | Route: returns full history + events, accepts `?start=` & `?end=` time filters |
+
+### GET /host/:id/logs — Host Logs Timeline (HTML)
+| File | Lines | Key Symbols | What |
+|---|---|---|---|
+| `src/app.js` | 109-345 | `app.get('/host/:id/logs', ...)` | Route: renders HTML timeline with time range picker (From/To datetime-local) |
+
 ### GET /events/fleet — SSE Live Fleet Updates
 | File | Lines | Key Symbols | What |
 |---|---|---|---|
