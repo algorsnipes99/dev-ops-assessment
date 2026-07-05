@@ -280,8 +280,11 @@ Retrieve the full telemetry history for a specific host, optionally filtered by 
 
 | Parameter | Type | Description |
 |---|---|---|
-| `start` | string (ISO-8601) | Optional. Return records after this timestamp (e.g., `2026-07-04T00:00:00Z`) |
-| `end` | string (ISO-8601) | Optional. Return records before this timestamp (e.g., `2026-07-05T23:59:59Z`) |
+| `start` | string (ISO-8601) | Optional. Return records after this timestamp |
+| `end` | string (ISO-8601) | Optional. Return records before this timestamp |
+| `limit` | integer | Optional. Max records to return (default: 500, use `0` or `all=true` for no limit) |
+| `offset` | integer | Optional. Number of records to skip (default: 0) |
+| `all` | boolean | Optional. Set to `true` to fetch all records (ignores limit) |
 
 ### Example Requests
 
@@ -291,17 +294,38 @@ curl http://localhost:3000/host/api-01/history
 
 # Get history within a specific time window
 curl "http://localhost:3000/host/api-01/history?start=2026-07-03T00:00:00Z&end=2026-07-04T00:00:00Z"
+
+# Get first 20 records (pagination)
+curl "http://localhost:3000/host/api-01/history?limit=20&offset=0"
+
+# Get next 20 records
+curl "http://localhost:3000/host/api-01/history?limit=20&offset=20"
+
+# Get all records
+curl "http://localhost:3000/host/api-01/history?all=true"
 ```
 
 ### Responses
 
 | Status | Condition | Body |
 |---|---|---|
-| `200` | Host found | `{"ok": true, "data": { "host": "...", "latest": {...}, "history": [...], "events": [...] } }` |
+| `200` | Host found | `{"ok": true, "data": { "host": "...", "latest": {...}, "history": [...], "events": [...], "pagination": {...} } }` |
 | `404` | Host not found | `{"ok": false, "error": "Host '...' not found"}` |
 | `500` | Internal server error | `{"ok": false, "error": "Internal server error"}` |
 
----
+The response now includes a `pagination` object:
+
+```json
+{
+  "limit": 20,
+  "offset": 0,
+  "telemetryTotal": 150,
+  "eventsTotal": 12,
+  "total": 162,
+  "hasMore": true
+}
+```
+
 
 ## GET /host/:id/logs
 
@@ -313,19 +337,12 @@ Returns an HTML timeline view of all telemetry records and events for a specific
 |---|---|---|
 | `id` | string | Host identifier (e.g., `api-01`, `db-01`) |
 
-### Query Parameters
-
-| Parameter | Type | Description |
-|---|---|---|
-| `start` | string (ISO-8601) | Optional. Show records after this timestamp |
-| `end` | string (ISO-8601) | Optional. Show records before this timestamp |
-
 ### Features
 
-- **Time range picker**: `From` and `To` datetime-local inputs to filter records
+- **Pagination**: Shows 20 records initially with "Show 20 more" and "Show all" buttons
+- **Time range picker**: `From` and `To` datetime-local inputs to filter records within a range
 - **Timeline cards**: Each heartbeat shows timestamp, CPU gauge, memory gauge, service health indicators
 - **Event interleaving**: Error/warning/incident events appear mixed in the timeline with colored borders
-- **Auto-refresh**: Page reloads every 30 seconds to show new data
 - **Live indicator**: Pulsing green dot confirms live data stream
 
 ---

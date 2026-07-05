@@ -170,7 +170,7 @@ Concepts are grouped by category. Each entry includes:
 
 ## 7. Docker Infrastructure
 
-### Dockerfile
+### Dockerfile (Application)
 | Lines | Key Symbols | What |
 |---|---|---|
 | 1-39 | Multi-stage build | Stage 1 (deps): `npm ci --only=production`. Stage 2 (runtime): minimal Alpine + node user |
@@ -178,14 +178,23 @@ Concepts are grouped by category. Each entry includes:
 | 19 | `USER node` | Run as unprivileged user |
 | 36-37 | `HEALTHCHECK` | wget against `/health` every 15s |
 
+### Dockerfile.feeder (Heartbeat Simulator)
+| Lines | Key Symbols | What |
+|---|---|---|
+| 1-19 | Single-stage build | Minimal node:18-alpine image, no npm deps (uses only built-in `http` module) |
+| 10 | `USER node` | Run as unprivileged user |
+| 16-19 | `CMD` | Runs feeder.js with defaults: interval=5, hosts=7, url=http://app:3000, events enabled |
+
 ### docker-compose.yml
 | Lines | Key Symbols | What |
 |---|---|---|
-| 4-58 | Services: `database`, `app` | Full orchestration definition |
-| 9-28 | `database` service | PostgreSQL 16 Alpine with health check + init volume |
-| 22 | `./init/init.sql:/docker-entrypoint-initdb.d/init.sql:ro` | Auto-init schema on first DB startup |
-| 24-27 | `healthcheck` | `pg_isready` every 5s |
-| 33-52 | `app` service | Build from Dockerfile, depends_on database (healthy), env_file |
+| 3-5 | `x-feeder-defaults` | YAML anchor for feeder environment defaults (interval, hosts, events, URL) |
+| 10-59 | Services: `database`, `app`, `feeder` | Full orchestration definition |
+| 14-33 | `database` service | PostgreSQL 16 Alpine with health check + init volume |
+| 27 | `./init/init.sql:/docker-entrypoint-initdb.d/init.sql:ro` | Auto-init schema on first DB startup |
+| 29-32 | `healthcheck` | `pg_isready` every 5s |
+| 37-57 | `app` service | Build from Dockerfile, depends_on database (healthy), env_file |
+| 55-63 | `feeder` service | Build from Dockerfile.feeder, depends_on app (healthy), no exposed ports |
 
 ---
 
@@ -201,10 +210,11 @@ Concepts are grouped by category. Each entry includes:
 | 94-98 | `cmd_restart()` | Stop + start |
 | 101-106 | `cmd_status()` | `docker compose ps` |
 | 109-124 | `cmd_logs()` | Tail logs, optional `--filter <string>` for grep |
-| 133-281 | `cmd_seed()` | Inject 6 telemetry payloads + 2 event signals via curl |
-| 284-318 | `cmd_remote()` | SSH-based remote diagnostic (`docker ps`), dry-run without credentials |
-| 321-351 | `cmd_snapshot()` | `pg_dump` custom format backup to `backups/` directory |
-| 354-388 | `usage()` | Help text |
+| 127-163 | `cmd_feeder()` | Manage feeder container: start, stop, restart, logs, status |
+| 166-314 | `cmd_seed()` | Inject 6 telemetry payloads + 2 event signals via curl |
+| 317-351 | `cmd_remote()` | SSH-based remote diagnostic (`docker ps`), dry-run without credentials |
+| 354-384 | `cmd_snapshot()` | `pg_dump` custom format backup to `backups/` directory |
+| 387-421 | `usage()` | Help text |
 
 ---
 

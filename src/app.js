@@ -36,20 +36,59 @@ app.post('/ingest', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// 1.2 Query & Visibility — GET /host/:id
+// Host History — GET /host/:id/history (JSON)
 // ---------------------------------------------------------------------------
-app.get('/host/:id', async (req, res) => {
+// Query params:
+//   ?start=2026-07-04T00:00:00Z&end=2026-07-05T23:59:59Z  — filter by time range
+//   &limit=20&offset=0  — pagination (default: limit=500, offset=0)
+//   &all=true            — override: fetch with no limit (limit=0)
+// ---------------------------------------------------------------------------
+app.get('/host/:id/history', async (req, res) => {
   try {
     const hostId = req.params.id;
-    const record = await db.getLatestTelemetry(hostId);
+    const startTime = req.query.start || null;
+    const endTime = req.query.end || null;
+    let limit = parseInt(req.query.limit, 10);
+    if (isNaN(limit) || limit < 0) limit = 500;
+    let offset = parseInt(req.query.offset, 10);
+    if (isNaN(offset) || offset < 0) offset = 0;
+    // Allow ?all=true to fetch everything
+    if (req.query.all === 'true') limit = 0;
 
-    if (!record) {
+    // Check host exists
+    const latest = await db.getLatestTelemetry(hostId);
+    if (!latest) {
       return res.status(404).json({ ok: false, error: `Host '${hostId}' not found` });
     }
 
-    return res.status(200).json({ ok: true, data: record });
+    const [history, historyTotal, events, eventsTotal] = await Promise.all([
+      db.getHostHistory(hostId, startTime, endTime, limit, offset),
+      db.getHostHistoryCount(hostId, startTime, endTime),
+      db.getHostEvents(hostId, limit, offset),
+      db.getHostEventsCount(hostId)
+    ]);
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        host: hostId,
+        latest,
+        history,
+        events,
+        start: startTime,
+        end: endTime,
+        pagination: {
+          limit,
+          offset,
+          telemetryTotal: historyTotal,
+          eventsTotal,
+          total: historyTotal + eventsTotal,
+          hasMore: (offset + limit) < (historyTotal + eventsTotal)
+        }
+      }
+    });
   } catch (err) {
-    logger.error({ err }, 'Host query error');
+    logger.error({ err }, 'Host history error');
     return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
 });
@@ -68,63 +107,37 @@ app.get('/fleet', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Host History — GET /host/:id/history (JSON)
-// ---------------------------------------------------------------------------
-// Query params:
-//   ?start=2026-07-04T00:00:00Z&end=2026-07-05T23:59:59Z  — filter by time range
-// ---------------------------------------------------------------------------
-app.get('/host/:id/history', async (req, res) => {
-  try {
-    const hostId = req.params.id;
-    const startTime = req.query.start || null;
-    const endTime = req.query.end || null;
-
-    // Check host exists
-    const latest = await db.getLatestTelemetry(hostId);
-    if (!latest) {
-      return res.status(404).json({ ok: false, error: `Host '${hostId}' not found` });
-    }
-
-    const [history, events] = await Promise.all([
-      db.getHostHistory(hostId, startTime, endTime),
-      db.getHostEvents(hostId)
-    ]);
-
-    return res.status(200).json({
-      ok: true,
-      data: {
-        host: hostId,
-        latest,
-        history,
-        events,
-        start: startTime,
-        end: endTime
-      }
-    });
-  } catch (err) {
-    logger.error({ err }, 'Host history error');
-    return res.status(500).json({ ok: false, error: 'Internal server error' });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Host Logs — GET /host/:id/logs (HTML timeline view)
+// Host Logs — GET /host/:id/logs (HTML timeline view with pagination)
 // ---------------------------------------------------------------------------
 app.get('/host/:id/logs', async (req, res) => {
   try {
     const hostId = req.params.id;
     const startTime = req.query.start || '';
     const endTime = req.query.end || '';
+    let limit = parseInt(req.query.limit, 10);
+    if (isNaN(limit) || limit < 1) limit = 20;
+    let offset = parseInt(req.query.offset, 10);
+    if (isNaN(offset) || offset < 0) offset = 0;
 
     const latest = await db.getLatestTelemetry(hostId);
     if (!latest) {
       return res.status(404).send(`<h1>404</h1><p>Host '${hostId}' not found</p>`);
     }
 
-    const [history, events] = await Promise.all([
-      db.getHostHistory(hostId, startTime || null, endTime || null),
-      db.getHostEvents(hostId)
+    const st = startTime || null;
+    const et = endTime || null;
+
+    const [history, historyTotal, events, eventsTotal] = await Promise.all([
+      db.getHostHistory(hostId, st, et, limit, offset),
+      db.getHostHistoryCount(hostId, st, et),
+      db.getHostEvents(hostId, limit, offset),
+      db.getHostEventsCount(hostId)
     ]);
+
+    const total = historyTotal + eventsTotal;
+    const shown = history.length + events.length;
+    const hasMore = (offset + shown) < total;
+    const nextOffset = offset + shown;
 
     const hostHealthy = latest.healthy;
     const healthBadge = hostHealthy
@@ -161,7 +174,7 @@ app.get('/host/:id/logs', async (req, res) => {
     });
 
     events.forEach(e => {
-      const typeIcon = e.type === 'error' ? '🔴' : e.type === 'warning' ? '🟡' : '🔵';
+      const typeIcon = e.type === 'error' ? '🟥' : e.type === 'warning' ? '🟨' : '🟦';
       timeline.push({
         ts: new Date(e.timestamp).getTime(),
         html: `<div class="tl-entry tl-event tl-event-${e.type}">
@@ -177,9 +190,18 @@ app.get('/host/:id/logs', async (req, res) => {
     // Sort timeline by timestamp descending (newest first)
     timeline.sort((a, b) => b.ts - a.ts);
 
-    const timelineHtml = timeline.length > 0
+    const timelineHtml = shown > 0
       ? timeline.map(t => t.html).join('\n')
       : '<div class="empty">No telemetry or event data for this host yet.</div>';
+
+    const moreBtn = hasMore
+      ? `<button class="btn" id="loadMoreBtn" onclick="loadMore()">Show 20 more</button>
+         <button class="btn" id="showAllBtn" onclick="loadAll()">Show all</button>`
+      : '';
+
+    const reqStart = req.query.start || '';
+    const reqEnd = req.query.end || '';
+    const fetchParams = `?start=${encodeURIComponent(reqStart)}&end=${encodeURIComponent(reqEnd)}`;
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -235,9 +257,13 @@ app.get('/host/:id/logs', async (req, res) => {
     }
     .controls .btn-primary:hover { background: #0284c7; }
     .controls .count { font-size: 0.85rem; color: #64748b; margin-left: auto; }
+    .pagination-bar {
+      display: flex; justify-content: center; gap: 0.75rem;
+      margin-top: 1.5rem; flex-wrap: wrap;
+    }
     .tl-entry {
       background: #1e293b; border-radius: 8px; padding: 0.75rem 1rem;
-      border-left: 3px solid #334155;
+      border-left: 3px solid #334155; margin-bottom: 0.5rem;
     }
     .tl-telemetry { border-left-color: #38bdf8; }
     .tl-event-error { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.06); }
@@ -313,15 +339,157 @@ app.get('/host/:id/logs', async (req, res) => {
       <input type="datetime-local" id="endTime" value="${endTime ? endTime.substring(0,16) : ''}">
       <button class="btn btn-primary" onclick="applyTimeFilter()">Apply</button>
       <button class="btn" onclick="clearFilter()">Clear</button>
-      <span class="count">${timeline.length} record${timeline.length !== 1 ? 's' : ''}</span>
+      <span class="count" id="recordCount">Showing ${shown} of ${total} record${total !== 1 ? 's' : ''}</span>
     </div>
 
     <div class="timeline" id="timeline">
       ${timelineHtml}
     </div>
+
+    ${moreBtn ? `<div class="pagination-bar" id="paginationBar">${moreBtn}</div>` : ''}
   </div>
 
   <script>
+    const hostId = ${JSON.stringify(hostId)};
+    const fetchParams = ${JSON.stringify(fetchParams)};
+    let currentOffset = ${nextOffset};
+    let loading = false;
+    let allLoaded = ${!hasMore};
+
+    async function loadMore() {
+      if (loading || allLoaded) return;
+      loading = true;
+      const btn = document.getElementById('loadMoreBtn');
+      if (btn) btn.textContent = 'Loading...';
+
+      try {
+        const resp = await fetch('/host/' + encodeURIComponent(hostId) + '/history' + fetchParams + '&limit=20&offset=' + currentOffset);
+        const json = await resp.json();
+        if (!json.ok || !json.data) return;
+
+        const data = json.data;
+        const timeline = document.getElementById('timeline');
+
+        // Append telemetry entries
+        (data.history || []).forEach(r => {
+          const servicesHtml = (r.services || []).map(s =>
+            '<span class="service ' + (s.healthy ? 'svc-ok' : 'svc-fail') + '">' + escapeHtml(s.name) + '</span>'
+          ).join('');
+          const cpuPct = r.cpu_load != null ? Math.round(r.cpu_load * 100) : 0;
+          const memMb = r.mem_used_mb || 0;
+          const memPct = Math.min(Math.round((memMb / 16384) * 100), 100);
+
+          const div = document.createElement('div');
+          div.className = 'tl-entry tl-telemetry';
+          div.innerHTML = '<div class="tl-header"><span class="tl-time">' + new Date(r.timestamp).toLocaleString() + '</span><span class="tl-type">Heartbeat</span></div>' +
+            '<div class="tl-metrics">' +
+            '<span class="metric">CPU <span class="gauge"><span class="gauge-fill gauge-cpu" style="width:' + cpuPct + '%"></span></span> ' + (r.cpu_load != null ? r.cpu_load.toFixed(2) : '—') + '</span>' +
+            '<span class="metric">MEM <span class="gauge"><span class="gauge-fill gauge-mem" style="width:' + memPct + '%"></span></span> ' + memMb.toLocaleString() + ' MB</span>' +
+            '</div>' +
+            '<div class="tl-services">' + servicesHtml + '</div>';
+          timeline.appendChild(div);
+        });
+
+        // Append event entries
+        (data.events || []).forEach(e => {
+          const icons = { error: '🟥', warning: '🟨', incident: '🟦' };
+          const icon = icons[e.type] || '🟦';
+          const div = document.createElement('div');
+          div.className = 'tl-entry tl-event tl-event-' + e.type;
+          div.innerHTML = '<div class="tl-header"><span class="tl-time">' + new Date(e.timestamp).toLocaleString() + '</span><span class="tl-type tl-type-' + e.type + '">' + icon + ' ' + e.type.toUpperCase() + '</span></div>' +
+            '<div class="tl-message">' + (e.message || '') + '</div>';
+          timeline.appendChild(div);
+        });
+
+        currentOffset = data.pagination.offset + data.history.length + data.events.length;
+        allLoaded = !data.pagination.hasMore;
+
+        // Update counter
+        const countEl = document.getElementById('recordCount');
+        if (countEl) {
+          countEl.textContent = 'Showing ' + currentOffset + ' of ' + data.pagination.total + ' records';
+        }
+
+        // Update pagination buttons
+        const pagBar = document.getElementById('paginationBar');
+        if (allLoaded) {
+          if (pagBar) pagBar.innerHTML = '';
+        } else {
+          if (btn) btn.textContent = 'Show 20 more';
+        }
+      } catch (e) {
+        console.error('Failed to load more:', e);
+        if (btn) btn.textContent = 'Show 20 more';
+      } finally {
+        loading = false;
+      }
+    }
+
+    async function loadAll() {
+      if (loading || allLoaded) return;
+      loading = true;
+      const showAllBtn = document.getElementById('showAllBtn');
+      const loadMoreBtn = document.getElementById('loadMoreBtn');
+      if (showAllBtn) showAllBtn.textContent = 'Loading...';
+
+      try {
+        const resp = await fetch('/host/' + encodeURIComponent(hostId) + '/history' + fetchParams + '&all=true');
+        const json = await resp.json();
+        if (!json.ok || !json.data) return;
+
+        const data = json.data;
+        const timeline = document.getElementById('timeline');
+        timeline.innerHTML = '';
+
+        // Build combined timeline from all records
+        const entries = [];
+
+        (data.history || []).forEach(r => {
+          const servicesHtml = (r.services || []).map(s =>
+            '<span class="service ' + (s.healthy ? 'svc-ok' : 'svc-fail') + '">' + escapeHtml(s.name) + '</span>'
+          ).join('');
+          const cpuPct = r.cpu_load != null ? Math.round(r.cpu_load * 100) : 0;
+          const memMb = r.mem_used_mb || 0;
+          const memPct = Math.min(Math.round((memMb / 16384) * 100), 100);
+
+          entries.push({
+            ts: new Date(r.timestamp).getTime(),
+            html: '<div class="tl-entry tl-telemetry">' +
+              '<div class="tl-header"><span class="tl-time">' + new Date(r.timestamp).toLocaleString() + '</span><span class="tl-type">Heartbeat</span></div>' +
+              '<div class="tl-metrics"><span class="metric">CPU <span class="gauge"><span class="gauge-fill gauge-cpu" style="width:' + cpuPct + '%"></span></span> ' + (r.cpu_load != null ? r.cpu_load.toFixed(2) : '—') + '</span>' +
+              '<span class="metric">MEM <span class="gauge"><span class="gauge-fill gauge-mem" style="width:' + memPct + '%"></span></span> ' + memMb.toLocaleString() + ' MB</span></div>' +
+              '<div class="tl-services">' + servicesHtml + '</div></div>'
+          });
+        });
+
+        (data.events || []).forEach(e => {
+          const icons = { error: '🟥', warning: '🟨', incident: '🟦' };
+          const icon = icons[e.type] || '🟦';
+          entries.push({
+            ts: new Date(e.timestamp).getTime(),
+            html: '<div class="tl-entry tl-event tl-event-' + e.type + '">' +
+              '<div class="tl-header"><span class="tl-time">' + new Date(e.timestamp).toLocaleString() + '</span><span class="tl-type tl-type-' + e.type + '">' + icon + ' ' + e.type.toUpperCase() + '</span></div>' +
+              '<div class="tl-message">' + (e.message || '') + '</div></div>'
+          });
+        });
+
+        entries.sort((a, b) => b.ts - a.ts);
+        timeline.innerHTML = entries.map(e => e.html).join('\n');
+
+        const countEl = document.getElementById('recordCount');
+        if (countEl) countEl.textContent = entries.length + ' records (all)';
+
+        const pagBar = document.getElementById('paginationBar');
+        if (pagBar) pagBar.innerHTML = '';
+        allLoaded = true;
+      } catch (e) {
+        console.error('Failed to load all:', e);
+        if (showAllBtn) showAllBtn.textContent = 'Show all';
+      } finally {
+        loading = false;
+      }
+    }
+
     function applyTimeFilter() {
       const start = document.getElementById('startTime').value;
       const end = document.getElementById('endTime').value;
@@ -331,11 +499,16 @@ app.get('/host/:id/logs', async (req, res) => {
       if (end) params.push('end=' + encodeURIComponent(end + ':59Z'));
       window.location.href = base + (params.length ? '?' + params.join('&') : '');
     }
+
     function clearFilter() {
       window.location.href = window.location.pathname;
     }
-    // Auto-refresh every 30s
-    setTimeout(function() { window.location.reload(); }, 30000);
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
   </script>
 </body>
 </html>`;

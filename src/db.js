@@ -67,68 +67,102 @@ async function getLatestTelemetry(host) {
 }
 
 /**
- * Retrieve the full telemetry history for a host, optionally filtered by time range.
- * When start/end times are provided, returns only records within that window.
+ * Retrieve telemetry history for a host, with optional time range filtering,
+ * pagination (limit/offset), and a mode to return all records (limit=0).
  */
-async function getHostHistory(host, startTime, endTime) {
-  let query;
-  let values;
+async function getHostHistory(host, startTime, endTime, limit = 500, offset = 0) {
+  const conditions = ['host = $1'];
+  const values = [host];
+  let paramIdx = 2;
 
-  if (startTime && endTime) {
-    query = `
-      SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
-      FROM telemetry
-      WHERE host = $1 AND timestamp >= $2 AND timestamp <= $3
-      ORDER BY timestamp DESC
-      LIMIT 500
-    `;
-    values = [host, startTime, endTime];
-  } else if (startTime) {
-    query = `
-      SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
-      FROM telemetry
-      WHERE host = $1 AND timestamp >= $2
-      ORDER BY timestamp DESC
-      LIMIT 500
-    `;
-    values = [host, startTime];
-  } else if (endTime) {
-    query = `
-      SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
-      FROM telemetry
-      WHERE host = $1 AND timestamp <= $2
-      ORDER BY timestamp DESC
-      LIMIT 500
-    `;
-    values = [host, endTime];
-  } else {
-    query = `
-      SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
-      FROM telemetry
-      WHERE host = $1
-      ORDER BY timestamp DESC
-      LIMIT 500
-    `;
-    values = [host];
+  if (startTime) {
+    conditions.push(`timestamp >= $${paramIdx++}`);
+    values.push(startTime);
   }
+  if (endTime) {
+    conditions.push(`timestamp <= $${paramIdx++}`);
+    values.push(endTime);
+  }
+
+  const limitClause = limit === 0 ? '' : ` LIMIT $${paramIdx++}`;
+  if (limit !== 0) values.push(limit);
+
+  const offsetClause = offset > 0 ? ` OFFSET $${paramIdx++}` : '';
+  if (offset > 0) values.push(offset);
+
+  const query = `
+    SELECT host, timestamp, cpu_load, mem_used_mb, services, ip
+    FROM telemetry
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY timestamp DESC
+    ${limitClause}
+    ${offsetClause}
+  `;
 
   const result = await pool.query(query, values);
   return result.rows;
 }
 
 /**
- * Retrieve all event records for a host.
+ * Get the total count of telemetry records for a host, with optional time range.
  */
-async function getHostEvents(host) {
+async function getHostHistoryCount(host, startTime, endTime) {
+  const conditions = ['host = $1'];
+  const values = [host];
+  let paramIdx = 2;
+
+  if (startTime) {
+    conditions.push(`timestamp >= $${paramIdx++}`);
+    values.push(startTime);
+  }
+  if (endTime) {
+    conditions.push(`timestamp <= $${paramIdx++}`);
+    values.push(endTime);
+  }
+
+  const query = `
+    SELECT COUNT(*) AS total
+    FROM telemetry
+    WHERE ${conditions.join(' AND ')}
+  `;
+
+  const result = await pool.query(query, values);
+  return parseInt(result.rows[0].total, 10);
+}
+
+/**
+ * Retrieve all event records for a host, with optional pagination.
+ */
+async function getHostEvents(host, limit = 100, offset = 0) {
+  const limitClause = limit === 0 ? '' : ` LIMIT $2`;
+  const offsetClause = offset > 0 ? ` OFFSET $3` : '';
+  const values = [host];
+  if (limit !== 0) values.push(limit);
+  if (offset > 0) values.push(offset);
+
   const query = `
     SELECT id, host, timestamp, type, message, created_at
     FROM events
     WHERE host = $1
     ORDER BY timestamp DESC
-    LIMIT 100
+    ${limitClause}
+    ${offsetClause}
+  `;
+  const result = await pool.query(query, values);
+  return result.rows;
+}
+
+/**
+ * Get the total count of events for a host.
+ */
+async function getHostEventsCount(host) {
+  const query = `
+    SELECT COUNT(*) AS total
+    FROM events
+    WHERE host = $1
   `;
   const result = await pool.query(query, [host]);
-  return result.rows;
+  return parseInt(result.rows[0].total, 10);
 }
 
 /**
@@ -182,7 +216,9 @@ module.exports = {
   getLatestTelemetry,
   getAllHostsSummary,
   getHostHistory,
+  getHostHistoryCount,
   getHostEvents,
+  getHostEventsCount,
   insertEvent,
   closePool
 };

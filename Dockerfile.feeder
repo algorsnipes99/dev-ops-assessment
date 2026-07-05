@@ -1,0 +1,24 @@
+# ============================================================================
+# Fleet Health Monitor — Heartbeat Feeder Container
+# ============================================================================
+# Minimal image for the continuous heartbeat simulator.
+# Uses only Node.js built-in modules (no npm dependencies).
+# ============================================================================
+
+FROM node:18-alpine
+
+# Security: run as unprivileged user
+USER node
+
+WORKDIR /app
+
+# Copy only the feeder script (zero external dependencies)
+COPY --chown=node:node heartbeats/feeder.js ./feeder.js
+
+# Defaults — overridden by docker-compose environment
+ENV FEEDER_INTERVAL=5 \
+    FEEDER_HOSTS=7 \
+    FEEDER_EVENTS=true \
+    FEEDER_URL=http://app:3000
+
+CMD node feeder.js --interval 5 --hosts 7 --url http://app:3000 --events

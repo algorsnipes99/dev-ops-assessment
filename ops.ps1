@@ -3,12 +3,12 @@
   Fleet Health Monitor - Windows Control Plane (PowerShell)
 .DESCRIPTION
   PowerShell equivalent of ops.sh for Windows users.
-  Manages Docker Compose lifecycle, seed data, snapshots, and remote diagnostics.
+  Manages Docker Compose lifecycle, feeder, seed data, snapshots, and remote diagnostics.
 .EXAMPLE
   .\ops.ps1 start       # Build and boot the stack
   .\ops.ps1 status      # Container runtime health
   .\ops.ps1 seed        # Inject synthetic telemetry
-  .\ops.ps1 logs        # Tail logs (use -Filter "api-01" to filter)
+  .\ops.ps1 feeder start # Start the heartbeat feeder
 #>
 
 param(
@@ -16,7 +16,10 @@ param(
   [string]$Command = "",
 
   [Parameter(Position = 1)]
-  [string]$Filter = ""
+  [string]$Filter = "",
+
+  [Parameter(Position = 2, DontShow)]
+  [string]$SubAction = ""
 )
 
 # --- Constants ---------------------------------------------------------------
@@ -97,6 +100,52 @@ function Get-Logs {
     docker compose -f $ComposeFile logs --tail=100 -f 2>&1 | Select-String $Filter
   } else {
     docker compose -f $ComposeFile logs --tail=50 -f
+  }
+}
+
+function Invoke-Feeder {
+  switch ($SubAction.ToLower()) {
+    "start" {
+      Write-Header "Starting Heartbeat Feeder"
+      docker compose -f $ComposeFile up --build -d feeder
+      if ($LASTEXITCODE -eq 0) {
+        Write-Info "Feeder is running. Use '.\ops.ps1 logs -Filter feeder' to see heartbeats."
+      }
+    }
+    "stop" {
+      Write-Header "Stopping Heartbeat Feeder"
+      docker compose -f $ComposeFile stop feeder
+      if ($LASTEXITCODE -eq 0) {
+        Write-Info "Feeder stopped."
+      }
+    }
+    "restart" {
+      Write-Header "Restarting Heartbeat Feeder"
+      docker compose -f $ComposeFile stop feeder
+      docker compose -f $ComposeFile up --build -d feeder
+    }
+    "logs" {
+      Write-Header "Heartbeat Feeder Logs"
+      docker compose -f $ComposeFile logs --tail=50 -f feeder
+    }
+    "status" {
+      Write-Header "Heartbeat Feeder Status"
+      docker compose -f $ComposeFile ps feeder
+    }
+    default {
+      Write-Host @"
+Usage: .\ops.ps1 feeder <start|stop|restart|logs|status>
+
+  start     Build and start the continuous heartbeat feeder container.
+  stop      Stop the feeder container without affecting app/database.
+  restart   Cycle the feeder (stop + start).
+  logs      Tail feeder logs (heartbeat output).
+  status    Show feeder container runtime status.
+
+The feeder simulates fleet hosts sending telemetry every N seconds.
+Configure via .env: FEEDER_INTERVAL, FEEDER_HOSTS, FEEDER_EVENTS
+"@
+    }
   }
 }
 
@@ -344,6 +393,8 @@ Subcommands:
   status        Query runtime health of active containers.
   logs          Tail aggregated logs (both DB and app).
                 Use -Filter <host_string> to filter.
+  feeder        Manage the continuous heartbeat feeder container.
+                Subcommands: start, stop, restart, logs, status
   seed          Inject diverse synthetic telemetry metrics.
   snapshot      Run pg_dump to save database backup to local filesystem.
   remote        Run 'docker ps' diagnostic on a remote host via SSH.
@@ -353,6 +404,8 @@ Subcommands:
 Examples:
   .\ops.ps1 start
   .\ops.ps1 logs -Filter "api-01"
+  .\ops.ps1 feeder start
+  .\ops.ps1 feeder logs
   .\ops.ps1 seed
   .\ops.ps1 snapshot
   .\ops.ps1 remote
@@ -367,6 +420,7 @@ switch ($Command.ToLower()) {
   "restart"  { Restart-Stack }
   "status"   { Get-Status }
   "logs"     { Get-Logs }
+  "feeder"   { Invoke-Feeder }
   "seed"     { Invoke-Seed }
   "snapshot" { Invoke-Snapshot }
   "remote"   { Invoke-Remote }

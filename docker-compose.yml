@@ -1,6 +1,12 @@
 # ============================================================================
 # Fleet Health Monitor — Docker Compose Orchestration
 # ============================================================================
+x-feeder-defaults: &feeder-defaults
+  FEEDER_INTERVAL: ${FEEDER_INTERVAL:-5}
+  FEEDER_HOSTS: ${FEEDER_HOSTS:-7}
+  FEEDER_EVENTS: ${FEEDER_EVENTS:-true}
+  FEEDER_URL: http://app:${PORT:-3000}
+
 services:
 
   # --------------------------------------------------------------------------
@@ -49,6 +55,21 @@ services:
       - "${PORT:-3000}:3000"
     depends_on:
       database:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Heartbeat Feeder (continuous telemetry simulator)
+  # --------------------------------------------------------------------------
+  feeder:
+    build:
+      context: .
+      dockerfile: Dockerfile.feeder
+    container_name: fleet-feeder
+    restart: unless-stopped
+    environment:
+      <<: *feeder-defaults
+    depends_on:
+      app:
         condition: service_healthy
 
 # ----------------------------------------------------------------------------

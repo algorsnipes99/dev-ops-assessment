@@ -8,10 +8,13 @@ src/app.js
   ├── src/db.js            (require → pool + query functions)
   └── src/validation.js    (require → validateTelemetryPayload)
 
+heartbeats/feeder.js       (standalone Node.js — no module deps, uses built-in http only)
 ops.sh                     (standalone Bash — no module deps)
+ops.ps1                    (standalone PowerShell — no module deps)
 init/init.sql              (standalone SQL — no module deps)
 Dockerfile                 (build pipeline — no runtime deps)
-docker-compose.yml         (orchestration — depends on Dockerfile + init.sql)
+Dockerfile.feeder          (build pipeline — copies heartbeats/feeder.js)
+docker-compose.yml         (orchestration — depends on Dockerfile + Dockerfile.feeder + init.sql)
 ```
 
 ## Module Responsibilities
@@ -19,10 +22,15 @@ docker-compose.yml         (orchestration — depends on Dockerfile + init.sql)
 ### `src/app.js` — Application Entry Point & HTTP Routes
 
 - Initializes Express with `express.json()` middleware
-- Defines 4 routes:
+- Defines routes:
   - `POST /ingest` — validates body via `validation.js`, persists via `db.js`, logs via `logger.js`
+  - `POST /events` — validates event payload, persists incident/error events
   - `GET /host/:id` — queries `db.getLatestTelemetry()`, returns 404 if not found
+  - `GET /host/:id/history` — returns full telemetry history with optional `?start=` & `?end=` time filtering
+  - `GET /host/:id/logs` — renders an HTML timeline page with time range picker (From/To datetime-local)
   - `GET /fleet` — queries `db.getAllHostsSummary()`, returns computed health
+  - `GET /dashboard` — renders live HTML dashboard with SSE auto-updates, clickable host links with ↗ arrows
+  - `GET /events/fleet` — Server-Sent Events endpoint that pushes fleet data every 2s to connected browsers
   - `GET /health` — returns immediate 200 (no DB interaction)
 - Implements `start()` function that:
   1. Calls `db.waitForDatabase()` — retries until PostgreSQL accepts connections
@@ -42,7 +50,10 @@ docker-compose.yml         (orchestration — depends on Dockerfile + init.sql)
   - `waitForDatabase(maxRetries, delayMs)` — polls `SELECT 1` in a loop, throws after exhaustion
   - `insertTelemetry({host, timestamp, cpu_load, mem_used_mb, services, ip})` — inserts a row with `services` stored as JSONB
   - `getLatestTelemetry(host)` — `SELECT ... WHERE host=$1 ORDER BY timestamp DESC LIMIT 1`
+  - `getHostHistory(host, startTime, endTime)` — returns up to 500 telemetry records with optional ISO-8601 time range filtering
+  - `getHostEvents(host)` — returns up to 100 event records for a host (errors, warnings, incidents)
   - `getAllHostsSummary()` — uses CTE `WITH latest AS (DISTINCT ON host ...)` to get latest per host, then computes `healthy` via `jsonb_array_elements` + `bool_and`
+  - `insertEvent({host, timestamp, type, message})` — inserts an error/incident event
   - `closePool()` — `pool.end()` for graceful shutdown
 
 ### `src/validation.js` — Payload Schema Validation
@@ -125,6 +136,9 @@ All configuration flows through environment variables, with sensible defaults:
 | `DB_USER` | `fleet_user` | `.env` / `docker-compose.yml` |
 | `DB_PASSWORD` | `fleet_pass` | `.env` / `docker-compose.yml` |
 | `DB_POOL_SIZE` | `10` | `.env` |
+| `FEEDER_INTERVAL` | `5` | `.env` / `docker-compose.yml` |
+| `FEEDER_HOSTS` | `7` | `.env` / `docker-compose.yml` |
+| `FEEDER_EVENTS` | `true` | `.env` / `docker-compose.yml` |
 
 ## Error Handling Strategy
 

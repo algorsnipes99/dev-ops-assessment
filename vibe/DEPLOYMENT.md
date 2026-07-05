@@ -112,8 +112,13 @@ Host Machine (localhost)
     │
     ├── :3000 ──→ fleet-app (Express, port 3000)
     │                  │
-    │                  │ (internal DNS: "database:5432")
-    │                  ▼
+    │                  ├── fleet-database (PostgreSQL, port 5432)
+    │                  │       │ (internal DNS: "database:5432")
+    │                  │
+    │                  └── fleet-feeder (Heartbeat Simulator)
+    │                          │ (internal: http://app:3000/ingest)
+    │                          └── sends telemetry every N seconds
+    │
     └── :5432 ──→ fleet-database (PostgreSQL, port 5432)
 ```
 
@@ -154,6 +159,37 @@ docker volume inspect dev-ops-assessment_pgdata
 # Remove volume (destroys all data)
 docker volume rm dev-ops-assessment_pgdata
 ```
+
+## Operations
+
+### Linux / macOS / WSL (`ops.sh`)
+
+```bash
+./ops.sh start             # Build and boot the stack
+./ops.sh stop              # Gracefully shut down
+./ops.sh restart           # Cycle the stack
+./ops.sh status            # Container runtime health
+./ops.sh logs              # Tail aggregated logs
+./ops.sh seed              # Inject synthetic telemetry data
+./ops.sh snapshot          # Database backup via pg_dump
+./ops.sh remote            # Remote diagnostic via SSH
+```
+
+### Windows PowerShell (`ops.ps1`)
+
+```powershell
+.\ops.ps1 start            # Build (no cache) and boot
+.\ops.ps1 stop             # Shut down
+.\ops.ps1 status           # Container health
+.\ops.ps1 logs             # Tail logs
+.\ops.ps1 seed             # Inject test data
+```
+
+> **Note:** `start` forces `docker compose build --no-cache` to ensure code changes always apply.
+
+### Windows Double-Click (`start.bat`)
+
+Double-click `start.bat` in the project root to rebuild and boot the stack without opening a terminal.
 
 ---
 

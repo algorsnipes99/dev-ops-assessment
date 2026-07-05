@@ -1,13 +1,13 @@
 # Operations Guide
 
-> **Control plane script:** `ops.sh` — POSIX-compliant Bash utility for local ecosystem management.
+> **Control plane scripts:** `ops.sh` (Bash — Linux/macOS/WSL) and `ops.ps1` (PowerShell — Windows)
 
 ## Prerequisites
 
-- Docker Engine (with Compose v2 plugin or `docker-compose` v1)
-- Bash 4+ (or any POSIX-compliant shell)
+- Docker Engine (with Compose v2 plugin `docker compose`)
+- Bash 4+ (Linux, macOS, or WSL on Windows) — for `ops.sh`
+- **PowerShell 5+ (Windows 11 built-in)** — for `ops.ps1`
 - `curl` (for `seed` subcommand)
-- `pg_dump` (for `snapshot` subcommand, installed locally)
 
 ## Quick Start
 
@@ -25,10 +25,13 @@ cp .env.example .env
 # 4. Seed test data
 ./ops.sh seed
 
-# 5. Query the fleet
+# 5. Start the heartbeat feeder (continuous telemetry)
+./ops.sh feeder start
+
+# 6. Query the fleet
 curl http://localhost:3000/fleet
 
-# 6. View logs
+# 7. View logs
 ./ops.sh logs
 ```
 
@@ -95,6 +98,28 @@ fleet-database      postgres:16-alpine         "docker-entrypoint.s…"   databa
 - When no filter is provided, streams all logs (DB + app) with `--tail=50 -f`
 - With `--filter`, pipes logs through `grep` for the given string
 - Press `Ctrl+C` to exit log streaming
+
+### `feeder` — Manage the heartbeat feeder container
+
+```
+./ops.sh feeder start        # Build and start the continuous feeder
+./ops.sh feeder stop         # Stop the feeder (app/database unaffected)
+./ops.sh feeder restart      # Cycle the feeder
+./ops.sh feeder logs         # Tail feeder heartbeat output
+./ops.sh feeder status       # Feeder container runtime health
+```
+
+The feeder is a lightweight containerized Node.js process that simulates fleet hosts sending telemetry payloads every N seconds. It automatically starts after the app is healthy when you run `./ops.sh start`, but you can also manage it independently.
+
+**Configuration (via `.env`):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `FEEDER_INTERVAL` | `5` | Seconds between heartbeat cycles |
+| `FEEDER_HOSTS` | `7` | Number of simulated hosts |
+| `FEEDER_EVENTS` | `true` | Also send random event signals (`true`/`false`) |
+
+The feeder uses only Node.js built-in modules (zero npm dependencies) and lives in its own Docker image built from `Dockerfile.feeder`. It communicates with the app over the internal Docker network at `http://app:3000`.
 
 ### `seed` — Inject synthetic telemetry
 
@@ -251,16 +276,76 @@ docker image rm dev-ops-assessment-app
 ./ops.sh start
 ```
 
+## Windows PowerShell (`ops.ps1`)
+
+On Windows, use `ops.ps1` instead of `ops.sh` (which requires WSL):
+
+```powershell
+.\ops.ps1 start            # Build (no cache) and boot the stack
+.\ops.ps1 stop             # Gracefully shut down
+.\ops.ps1 restart          # Cycle the stack
+.\ops.ps1 status           # Container runtime health
+.\ops.ps1 logs             # Tail aggregated logs
+.\ops.ps1 logs -Filter x   # Filter logs by host string
+.\ops.ps1 seed             # Inject synthetic telemetry data
+.\ops.ps1 snapshot         # Database backup via pg_dump
+.\ops.ps1 remote           # Remote diagnostic via SSH (dry-run)
+```
+
+The `start` command runs `docker compose build --no-cache` first to always pick up code changes.
+
+### `feeder` subcommand
+
+```powershell
+.\ops.ps1 feeder start        # Build and start the continuous feeder
+.\ops.ps1 feeder stop         # Stop the feeder
+.\ops.ps1 feeder restart      # Cycle the feeder
+.\ops.ps1 feeder logs         # Tail feeder logs
+.\ops.ps1 feeder status       # Feeder container health
+```
+
+## Quick Start (Windows)
+
+```powershell
+# Double-click start.bat OR run:
+.\ops.ps1 start
+.\ops.ps1 status
+.\ops.ps1 seed
+curl http://localhost:3000/dashboard
+```
+
+## Continuous Heartbeat Feeder
+
+The `heartbeats/feeder.js` script simulates a fleet sending telemetry every N seconds:
+
+```bash
+# Run with 5 hosts every 5 seconds (default)
+node heartbeats/feeder.js
+
+# Run with all 7 hosts every 3 seconds with event signals
+node heartbeats/feeder.js --hosts 7 --interval 3 --events
+
+# Custom URL
+node heartbeats/feeder.js --url http://localhost:3000
+```
+
+The feeder randomly varies CPU load, memory usage, and has an 8% chance per cycle of flipping a service's health status to simulate real incidents.
+
 ## File Layout (Operational Files)
 
 ```
 ./
 ├── .env                 # Local configuration (not committed)
 ├── .env.example         # Configuration template (committed)
+├── .gitignore           # Git ignore rules (node_modules, .env, backups, etc.)
 ├── docker-compose.yml   # Container orchestration
 ├── Dockerfile           # Application image build
-├── ops.sh               # Control plane script
+├── ops.sh               # Bash control plane (Linux/macOS/WSL)
+├── ops.ps1              # PowerShell control plane (Windows)
+├── start.bat            # Double-click Windows launcher
 ├── backups/             # Database snapshots (gitignored)
 │   └── fleet_health_*.sql
+├── heartbeats/
+│   └── feeder.js        # Continuous heartbeat simulator
 └── init/
     └── init.sql         # Database schema (auto-executed on first DB start)

@@ -123,6 +123,53 @@ cmd_logs() {
   fi
 }
 
+# --- Subcommand: feeder ------------------------------------------------------
+cmd_feeder() {
+  header "Heartbeat Feeder Container"
+  COMPOSE_CMD="$(find_compose_cmd)"
+
+  case "${1:-}" in
+    start|up)
+      info "Starting heartbeat feeder container..."
+      # shellcheck disable=SC2086
+      $COMPOSE_CMD -f "$COMPOSE_FILE" up --build -d feeder
+      info "Feeder is running. Use './ops.sh logs --filter feeder' to see heartbeats."
+      ;;
+    stop|down)
+      info "Stopping heartbeat feeder container..."
+      # shellcheck disable=SC2086
+      $COMPOSE_CMD -f "$COMPOSE_FILE" stop feeder
+      info "Feeder stopped."
+      ;;
+    restart)
+      cmd_feeder stop
+      cmd_feeder start
+      ;;
+    logs)
+      shift
+      # shellcheck disable=SC2086
+      $COMPOSE_CMD -f "$COMPOSE_FILE" logs --tail=50 -f feeder
+      ;;
+    status)
+      # shellcheck disable=SC2086
+      $COMPOSE_CMD -f "$COMPOSE_FILE" ps feeder
+      ;;
+    *)
+      echo "Usage: $(basename "$0") feeder <start|stop|restart|logs|status>"
+      echo ""
+      echo "  start     Build and start the continuous heartbeat feeder container."
+      echo "  stop      Stop the feeder container without affecting app/database."
+      echo "  restart   Cycle the feeder (stop + start)."
+      echo "  logs      Tail feeder logs (heartbeat output)."
+      echo "  status    Show feeder container runtime status."
+      echo ""
+      echo "The feeder simulates fleet hosts sending telemetry every N seconds."
+      echo "Configure via .env: FEEDER_INTERVAL, FEEDER_HOSTS, FEEDER_EVENTS"
+      return 0
+      ;;
+  esac
+}
+
 # --- Subcommand: seed --------------------------------------------------------
 cmd_seed() {
   header "Seeding Synthetic Metrics"
@@ -376,6 +423,8 @@ Subcommands:
   status      Query runtime health of active containers.
   logs        Tail aggregated logs (both DB and app).
               Optional: --filter <host_string>
+  feeder      Manage the continuous heartbeat feeder container.
+              Subcommands: start, stop, restart, logs, status
   seed        Inject diverse synthetic telemetry metrics via curl.
   snapshot    Run pg_dump to save database backup to local filesystem.
   remote      Run 'docker ps' diagnostic on a remote host via SSH.
@@ -388,6 +437,8 @@ Options:
 Examples:
   ./ops.sh start
   ./ops.sh logs --filter api-01
+  ./ops.sh feeder start
+  ./ops.sh feeder logs
   ./ops.sh seed
   ./ops.sh snapshot
   ./ops.sh remote
@@ -419,6 +470,10 @@ main() {
     logs)
       shift
       cmd_logs "$@"
+      ;;
+    feeder)
+      shift
+      cmd_feeder "$@"
       ;;
     seed)
       cmd_seed

@@ -2,32 +2,38 @@
 
 ## Purpose
 
-The Fleet Health Monitor is a production-ready telemetry ingestion service designed to:
+The Fleet Health Monitor is a production-ready telemetry ingestion and visualization service designed to:
 
 1. **Ingest** structured heartbeat/metric payloads from a fleet of servers via a REST API
 2. **Persist** telemetry data to PostgreSQL with time-series indexing
 3. **Query** individual host state (latest snapshot)
 4. **Aggregate** fleet-wide health status with computed health flags
-5. **Operate** reliably in containerized environments with graceful lifecycle management
+5. **Visualize** fleet health via a live-updating HTML dashboard with SSE streaming
+6. **Inspect** per-host heartbeat history with time-range filtering
+7. **Operate** reliably in containerized environments with graceful lifecycle management
 
 ## High-Level Architecture
 
 ```
-┌──────────────┐     POST /ingest     ┌──────────────────┐     INSERT     ┌────────────┐
-│ Fleet Hosts  │ ──────────────────→  │  Node.js/Express │ ────────────→  │ PostgreSQL │
-│ (curl/agents)│                      │   Fleet App      │                │  16 Alpine │
-└──────────────┘     GET /host/:id     └──────────────────┘     SELECT    └────────────┘
-                     GET /fleet                │                              │
-                           │                   │ pino                        │
-                           │                   ▼                              │
-                           │            ┌──────────┐                        │
-                           │            │  stdout  │                        │
-                           │            │ (JSON    │                        │
-                           │            │  logs)   │                        │
-                           │            └──────────┘                        │
-                           │                                                │
-                           └────────────────────────────────────────────────┘
-                               Docker Compose Orchestration
+┌──────────────────┐   POST /ingest   ┌──────────────────┐   INSERT   ┌────────────┐
+│ Fleet Hosts      │ ──────────────→  │  Node.js/Express │ ──────────→│ PostgreSQL │
+│ (curl/agents)    │                  │   Fleet App      │            │  16 Alpine │
+└──────────────────┘   GET /host/:id  └──────────────────┘   SELECT  └────────────┘
+                        GET /fleet            │                              │
+                              │               │                              │
+┌──────────────────┐         │               │ pino                         │
+│ fleet-feeder     │─────────│               ▼                              │
+│ (containerized   │  POST /ingest    ┌──────────┐                          │
+│  simulator)      │  every N sec     │  stdout  │                          │
+│ heartbeats/      │  (internal DNS)  │ (JSON    │                          │
+│  feeder.js       │                  │  logs)   │                          │
+└──────────────────┘                  └──────────┘                          │
+                                                                             │
+                                    ┌───────────────────────────────────────┘
+                                    │
+                                    ▼
+                              Docker Compose Orchestration
+                              (3 services: database, app, feeder)
 ```
 
 ## Components
@@ -61,7 +67,15 @@ The Fleet Health Monitor is a production-ready telemetry ingestion service desig
 - **Dockerfile**: Two-stage Node.js 18 Alpine build (deps + runtime). Runs as unprivileged `node` user. Includes `HEALTHCHECK` against `/health`
 - **docker-compose.yml**: Orchestrates `database` (PostgreSQL 16 Alpine with health check) and `app` (depends on DB health)
 
-### 7. Operations Script (`ops.sh`)
+### 7. Heartbeat Feeder (`Dockerfile.feeder` + `heartbeats/feeder.js`)
+- A lightweight containerized Node.js process for continuous telemetry simulation
+- Uses only Node.js built-in modules (zero npm dependencies)
+- Sends heartbeat payloads to the app every N seconds via the internal Docker network
+- Randomly varies CPU load, memory usage, and flips service health (8% probability)
+- Optionally sends random event signals (error/warning/incident)
+- Configurable via environment variables: `FEEDER_INTERVAL`, `FEEDER_HOSTS`, `FEEDER_EVENTS`
+
+### 8. Operations Script (`ops.sh`)
 - POSIX-compliant Bash utility for local ecosystem management
 - Subcommands: `start`, `stop`, `restart`, `status`, `logs`, `seed`, `snapshot`
 - Handles Docker Compose v1/v2 detection

@@ -16,12 +16,12 @@
 const http = require('http');
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Configuration (CLI args take precedence over environment variables)
 // ---------------------------------------------------------------------------
-const INTERVAL = parseArg('--interval', 5);
-const HOST_COUNT = parseArg('--hosts', 5);
-const BASE_URL = parseArg('--url', 'http://localhost:3000');
-const SEND_EVENTS = hasFlag('--events');
+const INTERVAL = parseArg('--interval', parseInt(process.env.FEEDER_INTERVAL, 10) || 5);
+const HOST_COUNT = parseArg('--hosts', parseInt(process.env.FEEDER_HOSTS, 10) || 5);
+const BASE_URL = parseArg('--url', process.env.FEEDER_URL || 'http://localhost:3000');
+const SEND_EVENTS = hasFlag('--events') || process.env.FEEDER_EVENTS === 'true';
 
 const parsedUrl = new URL(BASE_URL);
 const API_HOST = parsedUrl.hostname || 'localhost';
