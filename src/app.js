@@ -1,0 +1,738 @@
+'use strict';
+
+const express = require('express');
+const logger = require('./logger');
+const db = require('./db');
+const { validateTelemetryPayload, validateEventPayload } = require('./validation');
+
+// ---------------------------------------------------------------------------
+// Express App Setup
+// ---------------------------------------------------------------------------
+const app = express();
+app.use(express.json());
+
+// ---------------------------------------------------------------------------
+// 1.1 Ingestion Pipeline — POST /ingest
+// ---------------------------------------------------------------------------
+app.post('/ingest', async (req, res) => {
+  try {
+    const { valid, errors } = validateTelemetryPayload(req.body);
+
+    if (!valid) {
+      logger.warn({ errors, body: req.body }, 'Ingestion validation failed');
+      return res.status(400).json({ ok: false, errors });
+    }
+
+    const { host, timestamp, cpu_load, mem_used_mb, services, ip } = req.body;
+
+    await db.insertTelemetry({ host, timestamp, cpu_load, mem_used_mb, services, ip });
+
+    logger.info({ host, timestamp }, 'Telemetry ingested successfully');
+    return res.status(201).json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, 'Ingestion error');
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 1.2 Query & Visibility — GET /host/:id
+// ---------------------------------------------------------------------------
+app.get('/host/:id', async (req, res) => {
+  try {
+    const hostId = req.params.id;
+    const record = await db.getLatestTelemetry(hostId);
+
+    if (!record) {
+      return res.status(404).json({ ok: false, error: `Host '${hostId}' not found` });
+    }
+
+    return res.status(200).json({ ok: true, data: record });
+  } catch (err) {
+    logger.error({ err }, 'Host query error');
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 1.2 Query & Visibility — GET /fleet
+// ---------------------------------------------------------------------------
+app.get('/fleet', async (req, res) => {
+  try {
+    const rows = await db.getAllHostsSummary();
+    return res.status(200).json({ ok: true, data: rows });
+  } catch (err) {
+    logger.error({ err }, 'Fleet query error');
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Host History — GET /host/:id/history (JSON)
+// ---------------------------------------------------------------------------
+// Query params:
+//   ?service=nginx   — filter records to only those containing the named service
+// ---------------------------------------------------------------------------
+app.get('/host/:id/history', async (req, res) => {
+  try {
+    const hostId = req.params.id;
+    const serviceFilter = req.query.service || null;
+
+    // Check host exists
+    const latest = await db.getLatestTelemetry(hostId);
+    if (!latest) {
+      return res.status(404).json({ ok: false, error: `Host '${hostId}' not found` });
+    }
+
+    const [history, events] = await Promise.all([
+      db.getHostHistory(hostId, serviceFilter),
+      db.getHostEvents(hostId)
+    ]);
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        host: hostId,
+        latest,
+        history,
+        events,
+        filter: serviceFilter
+      }
+    });
+  } catch (err) {
+    logger.error({ err }, 'Host history error');
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Host Logs — GET /host/:id/logs (HTML timeline view)
+// ---------------------------------------------------------------------------
+app.get('/host/:id/logs', async (req, res) => {
+  try {
+    const hostId = req.params.id;
+    const serviceFilter = req.query.service || '';
+
+    const latest = await db.getLatestTelemetry(hostId);
+    if (!latest) {
+      return res.status(404).send(`<h1>404</h1><p>Host '${hostId}' not found</p>`);
+    }
+
+    const [history, events] = await Promise.all([
+      db.getHostHistory(hostId, serviceFilter || null),
+      db.getHostEvents(hostId)
+    ]);
+
+    // Build a unique list of service names for the filter dropdown
+    const allServiceNames = new Set();
+    history.forEach(r => (r.services || []).forEach(s => allServiceNames.add(s.name)));
+    const serviceNames = [...allServiceNames].sort();
+
+    const hostHealthy = latest.healthy;
+    const healthBadge = hostHealthy
+      ? '<span class="badge badge-ok">● Healthy</span>'
+      : '<span class="badge badge-fail">● Unhealthy</span>';
+
+    // Build timeline entries (interleave telemetry + events sorted by timestamp desc)
+    const timeline = [];
+
+    history.forEach(r => {
+      const servicesHtml = (r.services || []).map(s => {
+        const cls = s.healthy ? 'svc-ok' : 'svc-fail';
+        return `<span class="service ${cls}">${s.name}</span>`;
+      }).join('');
+
+      const cpuPct = r.cpu_load != null ? Math.round(r.cpu_load * 100) : 0;
+      const memMb = r.mem_used_mb || 0;
+      const memPct = Math.min(Math.round((memMb / 16384) * 100), 100);
+
+      timeline.push({
+        ts: new Date(r.timestamp).getTime(),
+        html: `<div class="tl-entry tl-telemetry">
+          <div class="tl-header">
+            <span class="tl-time">${new Date(r.timestamp).toLocaleString()}</span>
+            <span class="tl-type">Heartbeat</span>
+          </div>
+          <div class="tl-metrics">
+            <span class="metric">CPU <span class="gauge"><span class="gauge-fill gauge-cpu" style="width:${cpuPct}%"></span></span> ${r.cpu_load != null ? r.cpu_load.toFixed(2) : '—'}</span>
+            <span class="metric">MEM <span class="gauge"><span class="gauge-fill gauge-mem" style="width:${memPct}%"></span></span> ${memMb.toLocaleString()} MB</span>
+          </div>
+          <div class="tl-services">${servicesHtml}</div>
+        </div>`
+      });
+    });
+
+    events.forEach(e => {
+      const typeIcon = e.type === 'error' ? '🔴' : e.type === 'warning' ? '🟡' : '🔵';
+      timeline.push({
+        ts: new Date(e.timestamp).getTime(),
+        html: `<div class="tl-entry tl-event tl-event-${e.type}">
+          <div class="tl-header">
+            <span class="tl-time">${new Date(e.timestamp).toLocaleString()}</span>
+            <span class="tl-type tl-type-${e.type}">${typeIcon} ${e.type.toUpperCase()}</span>
+          </div>
+          <div class="tl-message">${e.message || ''}</div>
+        </div>`
+      });
+    });
+
+    // Sort timeline by timestamp descending (newest first)
+    timeline.sort((a, b) => b.ts - a.ts);
+
+    const timelineHtml = timeline.length > 0
+      ? timeline.map(t => t.html).join('\n')
+      : '<div class="empty">No telemetry or event data for this host yet.</div>';
+
+    // Filter dropdown options
+    const filterOptions = serviceNames.map(n =>
+      `<option value="${n}"${n === serviceFilter ? ' selected' : ''}>${n}</option>`
+    ).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Logs — ${hostId}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+      background: #0f172a; color: #e2e8f0;
+      padding: 2rem 1rem; min-height: 100vh;
+    }
+    .container { max-width: 1000px; margin: 0 auto; }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 1rem; margin-bottom: 2rem;
+    }
+    header h1 { font-size: 1.5rem; font-weight: 700; color: #e2e8f0; }
+    header .sub { font-size: 0.85rem; color: #94a3b8; }
+    .back-link {
+      color: #38bdf8; text-decoration: none; font-size: 0.9rem;
+    }
+    .back-link:hover { text-decoration: underline; }
+    .host-info {
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+      margin-bottom: 1.5rem;
+    }
+    .badge {
+      display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px;
+      font-size: 0.8rem; font-weight: 600;
+    }
+    .badge-ok { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
+    .badge-fail { color: #ef4444; background: rgba(239, 68, 68, 0.15); }
+    .controls {
+      display: flex; align-items: center; gap: 0.75rem;
+      margin-bottom: 1.5rem; flex-wrap: wrap;
+    }
+    .controls label { font-size: 0.85rem; color: #94a3b8; }
+    .controls select {
+      background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+      padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.85rem;
+    }
+    .controls .count { font-size: 0.85rem; color: #64748b; }
+    .timeline {
+      display: flex; flex-direction: column; gap: 0.5rem;
+    }
+    .tl-entry {
+      background: #1e293b; border-radius: 8px; padding: 0.75rem 1rem;
+      border-left: 3px solid #334155;
+    }
+    .tl-telemetry { border-left-color: #38bdf8; }
+    .tl-event-error { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.06); }
+    .tl-event-warning { border-left-color: #eab308; background: rgba(234, 179, 8, 0.06); }
+    .tl-event-incident { border-left-color: #3b82f6; background: rgba(59, 130, 246, 0.06); }
+    .tl-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.5rem;
+    }
+    .tl-time { font-size: 0.8rem; color: #64748b; font-family: monospace; }
+    .tl-type { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
+    .tl-type-error { color: #ef4444; }
+    .tl-type-warning { color: #eab308; }
+    .tl-type-incident { color: #3b82f6; }
+    .tl-metrics {
+      display: flex; gap: 1.5rem; margin-bottom: 0.5rem; flex-wrap: wrap;
+    }
+    .metric {
+      font-size: 0.85rem; color: #cbd5e1; display: flex; align-items: center; gap: 0.5rem;
+    }
+    .gauge {
+      display: inline-block; width: 80px; height: 6px; background: #334155;
+      border-radius: 3px; overflow: hidden; vertical-align: middle;
+    }
+    .gauge-fill {
+      display: block; height: 100%; border-radius: 3px; transition: width 0.3s;
+    }
+    .gauge-cpu { background: #38bdf8; }
+    .gauge-mem { background: #818cf8; }
+    .tl-services { display: flex; flex-wrap: wrap; gap: 4px; }
+    .service {
+      display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px;
+      font-size: 0.8rem; font-weight: 500;
+    }
+    .svc-ok { color: #22c55e; background: rgba(34, 197, 94, 0.10); }
+    .svc-fail { color: #ef4444; background: rgba(239, 68, 68, 0.12); }
+    .tl-message { font-size: 0.85rem; color: #e2e8f0; }
+    .empty { text-align: center; padding: 3rem; color: #64748b; }
+    .live-indicator {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 0.8rem; color: #22c55e;
+    }
+    .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #22c55e; animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    @media (max-width: 768px) {
+      body { padding: 1rem 0.5rem; }
+      header h1 { font-size: 1.2rem; }
+      .metric { font-size: 0.8rem; }
+      .gauge { width: 60px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <a href="/dashboard" class="back-link">← Fleet Dashboard</a>
+        <h1>📋 ${hostId}</h1>
+        <div class="sub">
+          ${latest.ip || '—'} · <span class="live-indicator"><span class="live-dot"></span> Live</span>
+        </div>
+      </div>
+      <div class="host-info">${healthBadge}</div>
+    </header>
+
+    <div class="controls">
+      <label for="serviceFilter">Filter by service:</label>
+      <select id="serviceFilter" onchange="applyFilter()">
+        <option value="">All services</option>
+        ${filterOptions}
+      </select>
+      <span class="count">${timeline.length} record${timeline.length !== 1 ? 's' : ''}</span>
+    </div>
+
+    <div class="timeline" id="timeline">
+      ${timelineHtml}
+    </div>
+  </div>
+
+  <script>
+    function applyFilter() {
+      const service = document.getElementById('serviceFilter').value;
+      const base = window.location.pathname;
+      const params = service ? '?service=' + encodeURIComponent(service) : '';
+      window.location.href = base + params;
+    }
+
+    // Auto-refresh every 5 seconds via SSE or simple polling
+    // For now, lightweight polling is more reliable across browsers
+    setTimeout(function() {
+      window.location.reload();
+    }, 30000); // Refresh page every 30s to show new data
+  </script>
+</body>
+</html>`;
+
+    return res.status(200).type('text/html').send(html);
+  } catch (err) {
+    logger.error({ err }, 'Host logs error');
+    return res.status(500).send('<h1>500 Internal Server Error</h1><p>Failed to load host logs.</p>');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SSE Fleet Stream — GET /events/fleet (Server-Sent Events)
+// ---------------------------------------------------------------------------
+// Keeps a pool of connected SSE clients. Every 2 seconds, queries fleet data
+// and pushes updates to all connected browsers in real-time.
+// ---------------------------------------------------------------------------
+const sseClients = new Set();
+
+// Periodic broadcast: query fleet data and push to all SSE clients
+let sseInterval = null;
+
+function broadcastFleetUpdate() {
+  db.getAllHostsSummary()
+    .then((rows) => {
+      const data = JSON.stringify({ ok: true, data: rows, timestamp: new Date().toISOString() });
+      for (const client of sseClients) {
+        client.res.write(`event: fleet\n`);
+        client.res.write(`data: ${data}\n\n`);
+      }
+    })
+    .catch((err) => {
+      logger.error({ err }, 'SSE broadcast error');
+      const errorData = JSON.stringify({ ok: false, error: 'Internal server error' });
+      for (const client of sseClients) {
+        client.res.write(`event: error\n`);
+        client.res.write(`data: ${errorData}\n\n`);
+      }
+    });
+}
+
+function startSSEBroadcast() {
+  if (sseInterval) return;
+  logger.info('Starting SSE fleet broadcast (every 2s)');
+  // Push immediately, then every 2s
+  broadcastFleetUpdate();
+  sseInterval = setInterval(broadcastFleetUpdate, 2000);
+  sseInterval.unref();
+}
+
+function stopSSEBroadcast() {
+  if (sseInterval) {
+    clearInterval(sseInterval);
+    sseInterval = null;
+  }
+}
+
+app.get('/events/fleet', (req, res) => {
+  // SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'  // Disable nginx buffering if behind proxy
+  });
+
+  // Send initial comment to confirm connection
+  res.write(':ok\n\n');
+
+  const clientId = Date.now() + Math.random().toString(36).slice(2);
+  const client = { id: clientId, res };
+  sseClients.add(client);
+
+  logger.info({ clientId, totalClients: sseClients.size }, 'SSE client connected');
+
+  // Start broadcast if not running
+  startSSEBroadcast();
+
+  // Clean up on disconnect
+  req.on('close', () => {
+    sseClients.delete(client);
+    logger.info({ clientId, totalClients: sseClients.size }, 'SSE client disconnected');
+    if (sseClients.size === 0) {
+      stopSSEBroadcast();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fleet Dashboard — GET /dashboard (HTML view + live SSE)
+// ---------------------------------------------------------------------------
+app.get('/dashboard', async (_req, res) => {
+  try {
+    const rows = await db.getAllHostsSummary();
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fleet Health Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 2rem 1rem;
+      min-height: 100vh;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 1rem; margin-bottom: 2rem;
+    }
+    header h1 {
+      font-size: 1.75rem; font-weight: 700;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    header .meta { font-size: 0.875rem; color: #94a3b8; }
+    .live-indicator {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.8rem; color: #22c55e;
+    }
+    .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #22c55e; animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    table {
+      width: 100%; border-collapse: collapse;
+      background: #1e293b; border-radius: 12px; overflow: hidden;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    }
+    th {
+      background: #0f172a; padding: 0.875rem 1rem; font-size: 0.75rem;
+      text-transform: uppercase; letter-spacing: 0.05em; color: #64748b;
+      text-align: left; border-bottom: 1px solid #334155;
+    }
+    td { padding: 0.875rem 1rem; border-bottom: 1px solid #1e293b; font-size: 0.9rem; }
+    tr:last-child td { border-bottom: none; }
+    .row-ok td { background: rgba(34, 197, 94, 0.04); }
+    .row-fail td { background: rgba(239, 68, 68, 0.06); }
+    .row-ok:hover td { background: rgba(34, 197, 94, 0.10); }
+    .row-fail:hover td { background: rgba(239, 68, 68, 0.12); }
+    .badge {
+      display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px;
+      font-size: 0.8rem; font-weight: 600;
+    }
+    .badge-ok { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
+    .badge-fail { color: #ef4444; background: rgba(239, 68, 68, 0.15); }
+    .cell-host { font-weight: 600; color: #e2e8f0; }
+    .cell-num { font-variant-numeric: tabular-nums; color: #cbd5e1; }
+    .cell-ip { font-family: 'JetBrains Mono', 'Cascadia Code', monospace; color: #94a3b8; font-size: 0.85rem; }
+    .cell-ts { color: #64748b; font-size: 0.85rem; }
+    .services { display: flex; flex-wrap: wrap; gap: 4px; }
+    .service {
+      display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px;
+      font-size: 0.8rem; font-weight: 500;
+    }
+    .svc-ok { color: #22c55e; background: rgba(34, 197, 94, 0.10); }
+    .svc-fail { color: #ef4444; background: rgba(239, 68, 68, 0.12); }
+    .empty { text-align: center; padding: 3rem; color: #64748b; }
+    .info-bar {
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    }
+    @media (max-width: 768px) {
+      body { padding: 1rem 0.5rem; }
+      th, td { padding: 0.625rem 0.5rem; font-size: 0.8rem; }
+      header h1 { font-size: 1.25rem; }
+      .cell-ts, .cell-ip { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>⚡ Fleet Health Dashboard</h1>
+        <div class="info-bar">
+          <span class="meta" id="hostCount">${rows.length} host${rows.length !== 1 ? 's' : ''} tracked</span>
+          <span class="live-indicator" id="liveIndicator"><span class="live-dot"></span> Live</span>
+          <span class="meta" id="lastUpdated">Updated: just now</span>
+        </div>
+      </div>
+    </header>
+    <div id="tableContainer">
+      ${rows.length === 0
+        ? '<div class="empty">No telemetry data received yet. Run <code>./ops.sh seed</code> to inject test data.</div>'
+        : `<table id="fleetTable">
+            <thead>
+              <tr>
+                <th>Host</th>
+                <th>Status</th>
+                <th>CPU Load</th>
+                <th>Memory</th>
+                <th>IP</th>
+                <th>Services</th>
+                <th>Timestamp</th>
+              </tr>
+            </thead>
+            <tbody id="fleetBody">${renderRows(rows)}</tbody>
+          </table>`
+      }
+    </div>
+  </div>
+
+  <script>
+    // SSE connection for live fleet updates
+    const source = new EventSource('/events/fleet');
+    const fleetBody = document.getElementById('fleetBody');
+    const hostCount = document.getElementById('hostCount');
+    const lastUpdated = document.getElementById('lastUpdated');
+
+    source.addEventListener('fleet', (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (!payload.ok || !payload.data) return;
+
+        const rows = payload.data;
+        const ts = new Date(payload.timestamp);
+
+        // Update host count
+        hostCount.textContent = rows.length + ' host' + (rows.length !== 1 ? 's' : '') + ' tracked';
+
+        // Update timestamp
+        lastUpdated.textContent = 'Updated: ' + ts.toLocaleTimeString();
+
+        // Re-render table body
+        if (fleetBody) {
+          fleetBody.innerHTML = renderRows(rows);
+        }
+      } catch (e) {
+        console.error('SSE parse error:', e);
+      }
+    });
+
+    source.addEventListener('error', (event) => {
+      console.warn('SSE connection error, will auto-reconnect:', event);
+    });
+
+    function renderRows(rows) {
+      return rows.map(r => {
+        const healthy = r.healthy;
+        const statusBadge = healthy
+          ? '<span class="badge badge-ok">\\u25cf Healthy</span>'
+          : '<span class="badge badge-fail">\\u25cf Unhealthy</span>';
+        const rowClass = healthy ? 'row-ok' : 'row-fail';
+
+        const servicesHtml = (r.services || [])
+          .map(s => {
+            const svcClass = s.healthy ? 'svc-ok' : 'svc-fail';
+            return '<span class="service ' + svcClass + '">' + escapeHtml(s.name) + '</span>';
+          })
+          .join('');
+
+        const ts = r.timestamp ? new Date(r.timestamp).toLocaleString() : '\\u2014';
+        const cpu = r.cpu_load != null ? r.cpu_load.toFixed(2) : '\\u2014';
+        const mem = r.mem_used_mb != null ? Number(r.mem_used_mb).toLocaleString() + ' MB' : '\\u2014';
+        const ip = r.ip || '\\u2014';
+        const hostLink = '<a href="/host/' + encodeURIComponent(r.host) + '/logs" style="color:inherit;text-decoration:none;">' + escapeHtml(r.host) + '</a>';
+
+        return '<tr class="' + rowClass + '">' +
+          '<td class="cell-host">' + hostLink + '</td>' +
+          '<td class="cell-status">' + statusBadge + '</td>' +
+          '<td class="cell-num">' + cpu + '</td>' +
+          '<td class="cell-num">' + mem + '</td>' +
+          '<td class="cell-ip">' + ip + '</td>' +
+          '<td class="cell-svc">' + servicesHtml + '</td>' +
+          '<td class="cell-ts">' + ts + '</td>' +
+          '</tr>';
+      }).join('');
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>`;
+
+    return res.status(200).type('text/html').send(html);
+  } catch (err) {
+    logger.error({ err }, 'Dashboard error');
+    return res.status(500).send('<h1>500 Internal Server Error</h1><p>Failed to load dashboard.</p>');
+  }
+});
+
+// Helper: render fleet rows as HTML (used by both server and client)
+function renderRows(rows) {
+  return rows.map((r) => {
+    const healthy = r.healthy;
+    const statusBadge = healthy
+      ? '<span class="badge badge-ok">● Healthy</span>'
+      : '<span class="badge badge-fail">● Unhealthy</span>';
+    const rowClass = healthy ? 'row-ok' : 'row-fail';
+
+    const servicesHtml = (r.services || [])
+      .map((s) => {
+        const svcClass = s.healthy ? 'svc-ok' : 'svc-fail';
+        return `<span class="service ${svcClass}">${s.name}</span>`;
+      })
+      .join('');
+
+    const ts = r.timestamp ? new Date(r.timestamp).toLocaleString() : '—';
+
+    const hostLink = `<a href="/host/${encodeURIComponent(r.host)}/logs" style="color:inherit;text-decoration:none;">${r.host}</a>`;
+
+    return `<tr class="${rowClass}">
+        <td class="cell-host">${hostLink}</td>
+        <td class="cell-status">${statusBadge}</td>
+        <td class="cell-num">${r.cpu_load != null ? r.cpu_load.toFixed(2) : '—'}</td>
+        <td class="cell-num">${r.mem_used_mb != null ? r.mem_used_mb.toLocaleString() + ' MB' : '—'}</td>
+        <td class="cell-ip">${r.ip || '—'}</td>
+        <td class="cell-svc">${servicesHtml}</td>
+        <td class="cell-ts">${ts}</td>
+      </tr>`;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// 1.3 Incident Ingestion — POST /events
+// ---------------------------------------------------------------------------
+app.post('/events', async (req, res) => {
+  try {
+    const { valid, errors } = validateEventPayload(req.body);
+
+    if (!valid) {
+      logger.warn({ errors, body: req.body }, 'Event validation failed');
+      return res.status(400).json({ ok: false, errors });
+    }
+
+    const { host, timestamp, type, message } = req.body;
+
+    await db.insertEvent({ host, timestamp, type, message });
+
+    logger.info({ host, timestamp, type }, 'Event ingested successfully');
+    return res.status(201).json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, 'Event ingestion error');
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check endpoint (for Docker liveness)
+// ---------------------------------------------------------------------------
+app.get('/health', (_req, res) => {
+  res.status(200).json({ ok: true, status: 'healthy' });
+});
+
+// ---------------------------------------------------------------------------
+// Server startup with database dependency check
+// ---------------------------------------------------------------------------
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+
+async function start() {
+  try {
+    // Block until PostgreSQL is ready (Startup Ordering & Liveness Check)
+    await db.waitForDatabase();
+
+    const server = app.listen(PORT, () => {
+      logger.info({ port: PORT }, 'Fleet Health Monitor listening');
+    });
+
+    // -----------------------------------------------------------------------
+    // Process Lifecycle Signals — SIGTERM & SIGINT
+    // -----------------------------------------------------------------------
+    function shutdown(signal) {
+      logger.info({ signal }, 'Shutdown signal received — draining connections');
+
+      server.close(async () => {
+        logger.info('HTTP server closed, draining DB pool');
+        try {
+          await db.closePool();
+          logger.info('Database pool drained — exiting');
+          process.exit(0);
+        } catch (err) {
+          logger.error({ err }, 'Error during pool drain');
+          process.exit(1);
+        }
+      });
+
+      // Force exit after 10s timeout
+      setTimeout(() => {
+        logger.error('Forced shutdown after timeout');
+        process.exit(1);
+      }, 10000).unref();
+    }
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+
+  } catch (err) {
+    logger.error({ err }, 'Failed to start application');
+    process.exit(1);
+  }
+}
+
+start();

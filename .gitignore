@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Database backups
+backups/*.sql
+backups/*.dump
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE / Editor
+.vscode/
+.idea/
+*.iml
+.vs/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Docker
+.docker/
+
+# Temp
+tmp/
+temp/
