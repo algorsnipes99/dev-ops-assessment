@@ -4,6 +4,19 @@
 
 ---
 
+## [1.2.1] — 2026-07-06
+
+### Fixed
+- **`?all=true` returning zero records** — `getTimelinePage` now omits `LIMIT` clause when `limit=0` (previously `LIMIT 0` returned zero rows)
+- **Duplicate `getTimelinePage` query** — Both `/history` and `/logs` endpoints now call the page query once, passing result to `getTimelineItems`
+- **`hasMore` always `true` with `?all=true`** — Now returns `false` when fetching all records
+- **Date-filtered latest record** — New `getLatestTelemetryInRange(host, start, end)` ensures header badge/IP respect the time filter
+- **Healthy badge in logs page** — `getLatestTelemetryInRange` now computes `healthy` field via SQL `bool_and`
+- **Timezone bug in date filter** — `applyTimeFilter` now converts local datetime to UTC before sending to server (`new Date(val).toISOString()`)
+- **`fetchParams` with empty values** — Server omits `start=`/`end=` from `fetchParams` when no filter is active
+- **"Load more" missing `?` separator** — `logs.js` now uses `?` when `fetchParams` is empty, `&` otherwise
+- **UTC timestamp consistency** — All timeline timestamps now rendered as `2026-07-05 23:26:08 UTC` in both server and client
+
 ## [1.2.0] — 2026-07-05
 
 ### Added

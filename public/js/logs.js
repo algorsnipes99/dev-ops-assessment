@@ -22,8 +22,16 @@ function escapeHtml(str) {
  * Render a single timeline record (heartbeat or event) as a DOM element.
  * The record comes from the UNION ALL query and has a record_type field.
  */
+function formatUtc(isoString) {
+  return isoString.replace('T', ' ').replace('Z', ' UTC');
+}
+
+/**
+ * Render a single timeline record (heartbeat or event) as a DOM element.
+ * The record comes from the UNION ALL query and has a record_type field.
+ */
 function renderTimelineRecord(r) {
-  var ts = new Date(r.timestamp).toLocaleString();
+  var ts = formatUtc(r.timestamp);
   if (r.record_type === 'heartbeat') {
     var servicesHtml = (r.services || []).map(function (s) {
       return '<span class="service ' + (s.healthy ? 'svc-ok' : 'svc-fail') + '">' + escapeHtml(s.name) + '</span>';

@@ -166,7 +166,7 @@ app.get('/host/:id/logs', async (req, res) => {
           ts: new Date(r.timestamp).getTime(),
           html: `<div class="tl-entry tl-telemetry">
             <div class="tl-header">
-              <span class="tl-time">${new Date(r.timestamp).toLocaleString()}</span>
+              <span class="tl-time">${new Date(r.timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC')}</span>
               <span class="tl-type">Heartbeat</span>
             </div>
             <div class="tl-metrics">
@@ -183,7 +183,7 @@ app.get('/host/:id/logs', async (req, res) => {
           ts: new Date(r.timestamp).getTime(),
           html: `<div class="tl-entry tl-event tl-event-${eventType}">
             <div class="tl-header">
-              <span class="tl-time">${new Date(r.timestamp).toLocaleString()}</span>
+              <span class="tl-time">${new Date(r.timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC')}</span>
               <span class="tl-type tl-type-${eventType}">${typeIcon} ${eventType.toUpperCase()}</span>
             </div>
             <div class="tl-message">${r.message || ''}</div>

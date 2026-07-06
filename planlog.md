@@ -56,6 +56,22 @@
 
 ---
 
+## Phase 4: Timeline Pagination & Date Filter Bug Fixes (Complete)
+
+| Task | Status | Date |
+|---|---|---|
+| Fix `getTimelinePage` LIMIT 0 bug (PostgreSQL `LIMIT 0` = zero rows) | ✅ Done | 2026-07-06 |
+| Add `getLatestTelemetryInRange` with date-filtered `healthy` computation | ✅ Done | 2026-07-06 |
+| Fix duplicate `getTimelinePage` query in both endpoints | ✅ Done | 2026-07-06 |
+| Fix `hasMore` returning `true` when `limit=0` | ✅ Done | 2026-07-06 |
+| Fix `fetchParams` emitting empty `start=`/`end=` | ✅ Done | 2026-07-06 |
+| Fix client-side `?`/`&` separator when no date filter | ✅ Done | 2026-07-06 |
+| Fix timezone bug in `applyTimeFilter` (local → UTC conversion) | ✅ Done | 2026-07-06 |
+| Standardize all timestamps to UTC format (`YYYY-MM-DD HH:MM:SS UTC`) | ✅ Done | 2026-07-06 |
+| Update docs (CONTEXT_MAP, LOGS, planlog) | ✅ Done | 2026-07-06 |
+
+---
+
 ## Phase Completion Summary
 
 | Phase | Status | Completed |
@@ -64,4 +80,5 @@
 | Phase 1: Error/Incident Endpoint | ✅ Complete | 8/8 |
 | Phase 2: Remote Diagnostic | ✅ Complete | 4/4 |
 | Phase 3: Build & Test | ✅ Complete | 8/8 |
-| **Total** | ✅ **All done** | **24/24 tasks** |
+| Phase 4: Timeline & Date Filter Bugs | ✅ Complete | 9/9 |
+| **Total** | ✅ **All done** | **33/33 tasks** |

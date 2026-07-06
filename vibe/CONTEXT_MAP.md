@@ -104,14 +104,22 @@ Concepts are grouped by category. Each entry includes:
 | Lines | Key Symbols | What |
 |---|---|---|
 | 45-52 | `insertTelemetry(...)` | Parameterized INSERT with JSONB for services |
-| 57-67 | `getLatestTelemetry(host)` | `SELECT ... WHERE host=$1 ORDER BY timestamp DESC LIMIT 1` |
-| 72-93 | `getAllHostsSummary()` | CTE `DISTINCT ON (host)` + `bool_and(jsonb_array_elements(...))` |
-| 98-105 | `insertEvent(...)` | Parameterized INSERT into events table |
+| 57-67 | `getLatestTelemetry(host)` | `SELECT ... WHERE host=$1 ORDER BY timestamp DESC LIMIT 1` (absolute latest) |
+| 70-96 | `getLatestTelemetryInRange(host, start, end)` | Latest telemetry within optional time range, includes computed `healthy` |
+| 98-119 | `getAllHostsSummary()` | CTE `DISTINCT ON (host)` + `bool_and(jsonb_array_elements(...))` |
+| 124-131 | `insertEvent(...)` | Parameterized INSERT into events table |
+
+### Timeline Functions (paginated host history)
+| Lines | Key Symbols | What |
+|---|---|---|
+| 249-293 | `getTimelinePage(host, start, end, limit, offset)` | UNION ALL query returning lightweight `(id, source, timestamp)` rows; supports `limit=0` for "all" |
+| 298-325 | `getTimelineTotal(host, start, end)` | COUNT of combined telemetry + event records |
+| 332-398 | `getTimelineItems(items, host)` | Fetches full records from telemetry/events tables for given (id, source) pairs |
 
 ### Connection Drain
 | Lines | Key Symbols | What |
 |---|---|---|
-| 108-110 | `closePool()` | `pool.end()` for graceful shutdown |
+| 241-243 | `closePool()` | `pool.end()` for graceful shutdown |
 
 ---
 
