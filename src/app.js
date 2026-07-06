@@ -10,6 +10,7 @@ const { validateTelemetryPayload, validateEventPayload } = require('./validation
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json());
+app.use(express.static('public'));
 
 // ---------------------------------------------------------------------------
 // 1.1 Ingestion Pipeline — POST /ingest
@@ -55,35 +56,37 @@ app.get('/host/:id/history', async (req, res) => {
     // Allow ?all=true to fetch everything
     if (req.query.all === 'true') limit = 0;
 
-    // Check host exists
-    const latest = await db.getLatestTelemetry(hostId);
+    // Check host exists (within date range if filtered)
+    const latest = await db.getLatestTelemetryInRange(hostId, startTime, endTime);
     if (!latest) {
       return res.status(404).json({ ok: false, error: `Host '${hostId}' not found` });
     }
 
-    const [history, historyTotal, events, eventsTotal] = await Promise.all([
-      db.getHostHistory(hostId, startTime, endTime, limit, offset),
-      db.getHostHistoryCount(hostId, startTime, endTime),
-      db.getHostEvents(hostId, limit, offset),
-      db.getHostEventsCount(hostId)
+    // Fetch timeline page items (lightweight) + total count in parallel
+    const [pageItems, timelineTotal] = await Promise.all([
+      db.getTimelinePage(hostId, startTime, endTime, limit, offset),
+      db.getTimelineTotal(hostId, startTime, endTime)
     ]);
+
+    // Then fetch full detail records using the page items
+    const timeline = await db.getTimelineItems(pageItems, hostId);
+
+    // hasMore: when limit=0 ("all"), we got everything so no more
+    const hasMore = limit > 0 ? (offset + limit) < timelineTotal : false;
 
     return res.status(200).json({
       ok: true,
       data: {
         host: hostId,
         latest,
-        history,
-        events,
+        timeline,
         start: startTime,
         end: endTime,
         pagination: {
           limit,
           offset,
-          telemetryTotal: historyTotal,
-          eventsTotal,
-          total: historyTotal + eventsTotal,
-          hasMore: (offset + limit) < (historyTotal + eventsTotal)
+          total: timelineTotal,
+          hasMore
         }
       }
     });
@@ -119,23 +122,24 @@ app.get('/host/:id/logs', async (req, res) => {
     let offset = parseInt(req.query.offset, 10);
     if (isNaN(offset) || offset < 0) offset = 0;
 
-    const latest = await db.getLatestTelemetry(hostId);
+    const st = startTime || null;
+    const et = endTime || null;
+
+    const latest = await db.getLatestTelemetryInRange(hostId, st, et);
     if (!latest) {
       return res.status(404).send(`<h1>404</h1><p>Host '${hostId}' not found</p>`);
     }
 
-    const st = startTime || null;
-    const et = endTime || null;
-
-    const [history, historyTotal, events, eventsTotal] = await Promise.all([
-      db.getHostHistory(hostId, st, et, limit, offset),
-      db.getHostHistoryCount(hostId, st, et),
-      db.getHostEvents(hostId, limit, offset),
-      db.getHostEventsCount(hostId)
+    // Fetch timeline page items (lightweight) + total count in parallel
+    const [pageItems, total] = await Promise.all([
+      db.getTimelinePage(hostId, st, et, limit, offset),
+      db.getTimelineTotal(hostId, st, et)
     ]);
 
-    const total = historyTotal + eventsTotal;
-    const shown = history.length + events.length;
+    // Then fetch full detail records using the page items
+    const timelineRows = await db.getTimelineItems(pageItems, hostId);
+
+    const shown = timelineRows.length;
     const hasMore = (offset + shown) < total;
     const nextOffset = offset + shown;
 
@@ -144,64 +148,65 @@ app.get('/host/:id/logs', async (req, res) => {
       ? '<span class="badge badge-ok">● Healthy</span>'
       : '<span class="badge badge-fail">● Unhealthy</span>';
 
-    // Build timeline entries (interleave telemetry + events sorted by timestamp desc)
+    // Build timeline HTML from the already-sorted UNION ALL result
     const timeline = [];
 
-    history.forEach(r => {
-      const servicesHtml = (r.services || []).map(s => {
-        const cls = s.healthy ? 'svc-ok' : 'svc-fail';
-        return `<span class="service ${cls}">${s.name}</span>`;
-      }).join('');
+    timelineRows.forEach(r => {
+      if (r.record_type === 'heartbeat') {
+        const servicesHtml = (r.services || []).map(s => {
+          const cls = s.healthy ? 'svc-ok' : 'svc-fail';
+          return `<span class="service ${cls}">${s.name}</span>`;
+        }).join('');
 
-      const cpuPct = r.cpu_load != null ? Math.round(r.cpu_load * 100) : 0;
-      const memMb = r.mem_used_mb || 0;
-      const memPct = Math.min(Math.round((memMb / 16384) * 100), 100);
+        const cpuPct = r.cpu_load != null ? Math.round(r.cpu_load * 100) : 0;
+        const memMb = r.mem_used_mb || 0;
+        const memPct = Math.min(Math.round((memMb / 16384) * 100), 100);
 
-      timeline.push({
-        ts: new Date(r.timestamp).getTime(),
-        html: `<div class="tl-entry tl-telemetry">
-          <div class="tl-header">
-            <span class="tl-time">${new Date(r.timestamp).toLocaleString()}</span>
-            <span class="tl-type">Heartbeat</span>
-          </div>
-          <div class="tl-metrics">
-            <span class="metric">CPU <span class="gauge"><span class="gauge-fill gauge-cpu" style="width:${cpuPct}%"></span></span> ${r.cpu_load != null ? r.cpu_load.toFixed(2) : '—'}</span>
-            <span class="metric">MEM <span class="gauge"><span class="gauge-fill gauge-mem" style="width:${memPct}%"></span></span> ${memMb.toLocaleString()} MB</span>
-          </div>
-          <div class="tl-services">${servicesHtml}</div>
-        </div>`
-      });
+        timeline.push({
+          ts: new Date(r.timestamp).getTime(),
+          html: `<div class="tl-entry tl-telemetry">
+            <div class="tl-header">
+              <span class="tl-time">${new Date(r.timestamp).toLocaleString()}</span>
+              <span class="tl-type">Heartbeat</span>
+            </div>
+            <div class="tl-metrics">
+              <span class="metric">CPU <span class="gauge"><span class="gauge-fill gauge-cpu" style="width:${cpuPct}%"></span></span> ${r.cpu_load != null ? r.cpu_load.toFixed(2) : '—'}</span>
+              <span class="metric">MEM <span class="gauge"><span class="gauge-fill gauge-mem" style="width:${memPct}%"></span></span> ${memMb.toLocaleString()} MB</span>
+            </div>
+            <div class="tl-services">${servicesHtml}</div>
+          </div>`
+        });
+      } else if (r.record_type === 'event') {
+        const eventType = r.event_type || 'incident';
+        const typeIcon = eventType === 'error' ? '🟥' : eventType === 'warning' ? '🟨' : '🟦';
+        timeline.push({
+          ts: new Date(r.timestamp).getTime(),
+          html: `<div class="tl-entry tl-event tl-event-${eventType}">
+            <div class="tl-header">
+              <span class="tl-time">${new Date(r.timestamp).toLocaleString()}</span>
+              <span class="tl-type tl-type-${eventType}">${typeIcon} ${eventType.toUpperCase()}</span>
+            </div>
+            <div class="tl-message">${r.message || ''}</div>
+          </div>`
+        });
+      }
     });
-
-    events.forEach(e => {
-      const typeIcon = e.type === 'error' ? '🟥' : e.type === 'warning' ? '🟨' : '🟦';
-      timeline.push({
-        ts: new Date(e.timestamp).getTime(),
-        html: `<div class="tl-entry tl-event tl-event-${e.type}">
-          <div class="tl-header">
-            <span class="tl-time">${new Date(e.timestamp).toLocaleString()}</span>
-            <span class="tl-type tl-type-${e.type}">${typeIcon} ${e.type.toUpperCase()}</span>
-          </div>
-          <div class="tl-message">${e.message || ''}</div>
-        </div>`
-      });
-    });
-
-    // Sort timeline by timestamp descending (newest first)
-    timeline.sort((a, b) => b.ts - a.ts);
 
     const timelineHtml = shown > 0
       ? timeline.map(t => t.html).join('\n')
       : '<div class="empty">No telemetry or event data for this host yet.</div>';
 
     const moreBtn = hasMore
-      ? `<button class="btn" id="loadMoreBtn" onclick="loadMore()">Show 20 more</button>
-         <button class="btn" id="showAllBtn" onclick="loadAll()">Show all</button>`
+      ? `<button class="btn" id="loadMoreBtn">Show 20 more</button>
+         <button class="btn" id="showAllBtn">Show all</button>`
       : '';
 
     const reqStart = req.query.start || '';
     const reqEnd = req.query.end || '';
-    const fetchParams = `?start=${encodeURIComponent(reqStart)}&end=${encodeURIComponent(reqEnd)}`;
+    const fpParts = [];
+    if (reqStart) fpParts.push('start=' + encodeURIComponent(reqStart));
+    if (reqEnd) fpParts.push('end=' + encodeURIComponent(reqEnd));
+    const fetchParams = fpParts.length > 0 ? '?' + fpParts.join('&') : '';
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -337,8 +342,8 @@ app.get('/host/:id/logs', async (req, res) => {
       <input type="datetime-local" id="startTime" value="${startTime ? startTime.substring(0,16) : ''}">
       <label for="endTime">To:</label>
       <input type="datetime-local" id="endTime" value="${endTime ? endTime.substring(0,16) : ''}">
-      <button class="btn btn-primary" onclick="applyTimeFilter()">Apply</button>
-      <button class="btn" onclick="clearFilter()">Clear</button>
+      <button class="btn btn-primary" id="applyBtn">Apply</button>
+      <button class="btn" id="clearBtn">Clear</button>
       <span class="count" id="recordCount">Showing ${shown} of ${total} record${total !== 1 ? 's' : ''}</span>
     </div>
 
@@ -350,166 +355,14 @@ app.get('/host/:id/logs', async (req, res) => {
   </div>
 
   <script>
-    const hostId = ${JSON.stringify(hostId)};
-    const fetchParams = ${JSON.stringify(fetchParams)};
-    let currentOffset = ${nextOffset};
-    let loading = false;
-    let allLoaded = ${!hasMore};
-
-    async function loadMore() {
-      if (loading || allLoaded) return;
-      loading = true;
-      const btn = document.getElementById('loadMoreBtn');
-      if (btn) btn.textContent = 'Loading...';
-
-      try {
-        const resp = await fetch('/host/' + encodeURIComponent(hostId) + '/history' + fetchParams + '&limit=20&offset=' + currentOffset);
-        const json = await resp.json();
-        if (!json.ok || !json.data) return;
-
-        const data = json.data;
-        const timeline = document.getElementById('timeline');
-
-        // Append telemetry entries
-        (data.history || []).forEach(r => {
-          const servicesHtml = (r.services || []).map(s =>
-            '<span class="service ' + (s.healthy ? 'svc-ok' : 'svc-fail') + '">' + escapeHtml(s.name) + '</span>'
-          ).join('');
-          const cpuPct = r.cpu_load != null ? Math.round(r.cpu_load * 100) : 0;
-          const memMb = r.mem_used_mb || 0;
-          const memPct = Math.min(Math.round((memMb / 16384) * 100), 100);
-
-          const div = document.createElement('div');
-          div.className = 'tl-entry tl-telemetry';
-          div.innerHTML = '<div class="tl-header"><span class="tl-time">' + new Date(r.timestamp).toLocaleString() + '</span><span class="tl-type">Heartbeat</span></div>' +
-            '<div class="tl-metrics">' +
-            '<span class="metric">CPU <span class="gauge"><span class="gauge-fill gauge-cpu" style="width:' + cpuPct + '%"></span></span> ' + (r.cpu_load != null ? r.cpu_load.toFixed(2) : '—') + '</span>' +
-            '<span class="metric">MEM <span class="gauge"><span class="gauge-fill gauge-mem" style="width:' + memPct + '%"></span></span> ' + memMb.toLocaleString() + ' MB</span>' +
-            '</div>' +
-            '<div class="tl-services">' + servicesHtml + '</div>';
-          timeline.appendChild(div);
-        });
-
-        // Append event entries
-        (data.events || []).forEach(e => {
-          const icons = { error: '🟥', warning: '🟨', incident: '🟦' };
-          const icon = icons[e.type] || '🟦';
-          const div = document.createElement('div');
-          div.className = 'tl-entry tl-event tl-event-' + e.type;
-          div.innerHTML = '<div class="tl-header"><span class="tl-time">' + new Date(e.timestamp).toLocaleString() + '</span><span class="tl-type tl-type-' + e.type + '">' + icon + ' ' + e.type.toUpperCase() + '</span></div>' +
-            '<div class="tl-message">' + (e.message || '') + '</div>';
-          timeline.appendChild(div);
-        });
-
-        currentOffset = data.pagination.offset + data.history.length + data.events.length;
-        allLoaded = !data.pagination.hasMore;
-
-        // Update counter
-        const countEl = document.getElementById('recordCount');
-        if (countEl) {
-          countEl.textContent = 'Showing ' + currentOffset + ' of ' + data.pagination.total + ' records';
-        }
-
-        // Update pagination buttons
-        const pagBar = document.getElementById('paginationBar');
-        if (allLoaded) {
-          if (pagBar) pagBar.innerHTML = '';
-        } else {
-          if (btn) btn.textContent = 'Show 20 more';
-        }
-      } catch (e) {
-        console.error('Failed to load more:', e);
-        if (btn) btn.textContent = 'Show 20 more';
-      } finally {
-        loading = false;
-      }
-    }
-
-    async function loadAll() {
-      if (loading || allLoaded) return;
-      loading = true;
-      const showAllBtn = document.getElementById('showAllBtn');
-      const loadMoreBtn = document.getElementById('loadMoreBtn');
-      if (showAllBtn) showAllBtn.textContent = 'Loading...';
-
-      try {
-        const resp = await fetch('/host/' + encodeURIComponent(hostId) + '/history' + fetchParams + '&all=true');
-        const json = await resp.json();
-        if (!json.ok || !json.data) return;
-
-        const data = json.data;
-        const timeline = document.getElementById('timeline');
-        timeline.innerHTML = '';
-
-        // Build combined timeline from all records
-        const entries = [];
-
-        (data.history || []).forEach(r => {
-          const servicesHtml = (r.services || []).map(s =>
-            '<span class="service ' + (s.healthy ? 'svc-ok' : 'svc-fail') + '">' + escapeHtml(s.name) + '</span>'
-          ).join('');
-          const cpuPct = r.cpu_load != null ? Math.round(r.cpu_load * 100) : 0;
-          const memMb = r.mem_used_mb || 0;
-          const memPct = Math.min(Math.round((memMb / 16384) * 100), 100);
-
-          entries.push({
-            ts: new Date(r.timestamp).getTime(),
-            html: '<div class="tl-entry tl-telemetry">' +
-              '<div class="tl-header"><span class="tl-time">' + new Date(r.timestamp).toLocaleString() + '</span><span class="tl-type">Heartbeat</span></div>' +
-              '<div class="tl-metrics"><span class="metric">CPU <span class="gauge"><span class="gauge-fill gauge-cpu" style="width:' + cpuPct + '%"></span></span> ' + (r.cpu_load != null ? r.cpu_load.toFixed(2) : '—') + '</span>' +
-              '<span class="metric">MEM <span class="gauge"><span class="gauge-fill gauge-mem" style="width:' + memPct + '%"></span></span> ' + memMb.toLocaleString() + ' MB</span></div>' +
-              '<div class="tl-services">' + servicesHtml + '</div></div>'
-          });
-        });
-
-        (data.events || []).forEach(e => {
-          const icons = { error: '🟥', warning: '🟨', incident: '🟦' };
-          const icon = icons[e.type] || '🟦';
-          entries.push({
-            ts: new Date(e.timestamp).getTime(),
-            html: '<div class="tl-entry tl-event tl-event-' + e.type + '">' +
-              '<div class="tl-header"><span class="tl-time">' + new Date(e.timestamp).toLocaleString() + '</span><span class="tl-type tl-type-' + e.type + '">' + icon + ' ' + e.type.toUpperCase() + '</span></div>' +
-              '<div class="tl-message">' + (e.message || '') + '</div></div>'
-          });
-        });
-
-        entries.sort((a, b) => b.ts - a.ts);
-        timeline.innerHTML = entries.map(e => e.html).join('\n');
-
-        const countEl = document.getElementById('recordCount');
-        if (countEl) countEl.textContent = entries.length + ' records (all)';
-
-        const pagBar = document.getElementById('paginationBar');
-        if (pagBar) pagBar.innerHTML = '';
-        allLoaded = true;
-      } catch (e) {
-        console.error('Failed to load all:', e);
-        if (showAllBtn) showAllBtn.textContent = 'Show all';
-      } finally {
-        loading = false;
-      }
-    }
-
-    function applyTimeFilter() {
-      const start = document.getElementById('startTime').value;
-      const end = document.getElementById('endTime').value;
-      const base = window.location.pathname;
-      const params = [];
-      if (start) params.push('start=' + encodeURIComponent(start + ':00Z'));
-      if (end) params.push('end=' + encodeURIComponent(end + ':59Z'));
-      window.location.href = base + (params.length ? '?' + params.join('&') : '');
-    }
-
-    function clearFilter() {
-      window.location.href = window.location.pathname;
-    }
-
-    function escapeHtml(str) {
-      const div = document.createElement('div');
-      div.textContent = str;
-      return div.innerHTML;
-    }
+    window.__LOGS_CONFIG__ = ${JSON.stringify({
+      hostId,
+      fetchParams,
+      nextOffset,
+      allLoaded: !hasMore
+    })};
   </script>
+  <script src="/js/logs.js"></script>
 </body>
 </html>`;
 
@@ -720,79 +573,7 @@ app.get('/dashboard', async (_req, res) => {
     </div>
   </div>
 
-  <script>
-    // SSE connection for live fleet updates
-    const source = new EventSource('/events/fleet');
-    const fleetBody = document.getElementById('fleetBody');
-    const hostCount = document.getElementById('hostCount');
-    const lastUpdated = document.getElementById('lastUpdated');
-
-    source.addEventListener('fleet', (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (!payload.ok || !payload.data) return;
-
-        const rows = payload.data;
-        const ts = new Date(payload.timestamp);
-
-        // Update host count
-        hostCount.textContent = rows.length + ' host' + (rows.length !== 1 ? 's' : '') + ' tracked';
-
-        // Update timestamp
-        lastUpdated.textContent = 'Updated: ' + ts.toLocaleTimeString();
-
-        // Re-render table body
-        if (fleetBody) {
-          fleetBody.innerHTML = renderRows(rows);
-        }
-      } catch (e) {
-        console.error('SSE parse error:', e);
-      }
-    });
-
-    source.addEventListener('error', (event) => {
-      console.warn('SSE connection error, will auto-reconnect:', event);
-    });
-
-    function renderRows(rows) {
-      return rows.map(r => {
-        const healthy = r.healthy;
-        const statusBadge = healthy
-          ? '<span class="badge badge-ok">\\u25cf Healthy</span>'
-          : '<span class="badge badge-fail">\\u25cf Unhealthy</span>';
-        const rowClass = healthy ? 'row-ok' : 'row-fail';
-
-        const servicesHtml = (r.services || [])
-          .map(s => {
-            const svcClass = s.healthy ? 'svc-ok' : 'svc-fail';
-            return '<span class="service ' + svcClass + '">' + escapeHtml(s.name) + '</span>';
-          })
-          .join('');
-
-        const ts = r.timestamp ? new Date(r.timestamp).toLocaleString() : '\\u2014';
-        const cpu = r.cpu_load != null ? r.cpu_load.toFixed(2) : '\\u2014';
-        const mem = r.mem_used_mb != null ? Number(r.mem_used_mb).toLocaleString() + ' MB' : '\\u2014';
-        const ip = r.ip || '\\u2014';
-        const hostLink = '<a href="/host/' + encodeURIComponent(r.host) + '/logs" style="color:inherit;text-decoration:none;">' + escapeHtml(r.host) + ' <span class="host-arrow">\u2197</span></a>';
-
-        return '<tr class="' + rowClass + '">' +
-          '<td class="cell-host">' + hostLink + '</td>' +
-          '<td class="cell-status">' + statusBadge + '</td>' +
-          '<td class="cell-num">' + cpu + '</td>' +
-          '<td class="cell-num">' + mem + '</td>' +
-          '<td class="cell-ip">' + ip + '</td>' +
-          '<td class="cell-svc">' + servicesHtml + '</td>' +
-          '<td class="cell-ts">' + ts + '</td>' +
-          '</tr>';
-      }).join('');
-    }
-
-    function escapeHtml(str) {
-      const div = document.createElement('div');
-      div.textContent = str;
-      return div.innerHTML;
-    }
-  </script>
+  <script src="/js/dashboard.js"></script>
 </body>
 </html>`;
 

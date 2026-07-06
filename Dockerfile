@@ -26,6 +26,9 @@ COPY --chown=node:node --from=deps /app/node_modules ./node_modules
 # Copy application source code
 COPY --chown=node:node src/ .
 
+# Copy static assets (client-side JS)
+COPY --chown=node:node public/ ./public/
+
 # Environment defaults
 ENV PORT=3000 \
     NODE_ENV=production
