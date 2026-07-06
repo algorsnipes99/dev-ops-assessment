@@ -40,19 +40,22 @@ curl http://localhost:3000/fleet
 ### `start` — Build and boot the stack
 
 ```
-./ops.sh start
+./ops.sh start            # Database + app only (production-safe default)
+./ops.sh start --feeder   # Database + app + heartbeat simulator (development)
 ```
 
 - Builds Docker image (multi-stage)
 - Creates Docker network and volumes
 - Starts PostgreSQL first, waits for health check
 - Starts the app container (which also does its own DB readiness poll)
+- The heartbeat feeder is **opt-in** via `--feeder` — it is NOT started by default
 - Runs in detached mode
 
 **What happens internally:**
 1. Ensures `.env` exists (copies from `.env.example` if missing)
-2. Runs `docker compose up --build -d`
-3. Containers boot: `database` → `app`
+2. Without `--feeder`: runs `docker compose up --build -d` (database + app only)
+3. With `--feeder`: runs `docker compose --profile feeder up --build -d` (all three services)
+4. Containers boot: `database` → `app` → (optionally) `feeder`
 
 ### `stop` — Gracefully shut down
 

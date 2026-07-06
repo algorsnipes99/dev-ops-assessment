@@ -74,9 +74,27 @@ cmd_start() {
   header "Starting Fleet Health Monitor"
   ensure_env
   COMPOSE_CMD="$(find_compose_cmd)"
-  info "Building images and starting containers in detached mode..."
-  # shellcheck disable=SC2086
-  $COMPOSE_CMD -f "$COMPOSE_FILE" up --build -d
+
+  WITH_FEEDER=false
+  if [ "${1:-}" = "--feeder" ]; then
+    WITH_FEEDER=true
+  fi
+
+  if $WITH_FEEDER; then
+    info "Building images and starting containers (with heartbeat feeder) in detached mode..."
+    # shellcheck disable=SC2086
+    $COMPOSE_CMD -f "$COMPOSE_FILE" --profile feeder up --build -d
+  else
+    # Tear down any leftover feeder container from a previous dev-mode run
+    if $COMPOSE_CMD -f "$COMPOSE_FILE" --profile feeder ps -q feeder 2>/dev/null | grep -q .; then
+      info "Removing existing feeder container (switching to production mode)..."
+      # shellcheck disable=SC2086
+      $COMPOSE_CMD -f "$COMPOSE_FILE" --profile feeder rm -sf feeder
+    fi
+    info "Building images and starting containers (database + app only) in detached mode..."
+    # shellcheck disable=SC2086
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up --build -d
+  fi
   info "Containers are booting. Use './ops.sh status' to check health."
 }
 
@@ -132,7 +150,7 @@ cmd_feeder() {
     start|up)
       info "Starting heartbeat feeder container..."
       # shellcheck disable=SC2086
-      $COMPOSE_CMD -f "$COMPOSE_FILE" up --build -d feeder
+      $COMPOSE_CMD -f "$COMPOSE_FILE" --profile feeder up --build -d feeder
       info "Feeder is running. Use './ops.sh logs --filter feeder' to see heartbeats."
       ;;
     stop|down)
@@ -418,6 +436,7 @@ Usage: $(basename "$0") <subcommand> [options]
 Subcommands:
 
   start       Build images and boot the multi-container stack (detached).
+              Use 'start --feeder' to also include the heartbeat simulator.
   stop        Gracefully stop containers and clean up networks.
   restart     Cycle the application (stop + start).
   status      Query runtime health of active containers.
@@ -436,6 +455,7 @@ Options:
 
 Examples:
   ./ops.sh start
+  ./ops.sh start --feeder
   ./ops.sh logs --filter api-01
   ./ops.sh feeder start
   ./ops.sh feeder logs
@@ -456,7 +476,8 @@ main() {
 
   case "$SUBCOMMAND" in
     start)
-      cmd_start
+      shift
+      cmd_start "$@"
       ;;
     stop)
       cmd_stop

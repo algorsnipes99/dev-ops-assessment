@@ -18,6 +18,8 @@ param(
   [Parameter(Position = 1)]
   [string]$Filter = "",
 
+  [switch]$Feeder = $false,
+
   [Parameter(Position = 2, DontShow)]
   [string]$SubAction = ""
 )
@@ -66,9 +68,23 @@ function Get-EnvValue {
 function Start-Stack {
   Write-Header "Starting Fleet Health Monitor"
   Ensure-Env
-  Write-Info "Building images (no cache) and starting containers in detached mode..."
-  docker compose -f $ComposeFile build --no-cache
-  docker compose -f $ComposeFile up -d
+
+  if ($Feeder) {
+    Write-Info "Building images (no cache) and starting containers (with heartbeat feeder) in detached mode..."
+    docker compose -f $ComposeFile build --no-cache
+    docker compose -f $ComposeFile --profile feeder up -d
+  } else {
+    # Tear down any leftover feeder container from a previous dev-mode run
+    $existing = docker compose -f $ComposeFile --profile feeder ps -q feeder 2>$null
+    if ($existing) {
+      Write-Info "Removing existing feeder container (switching to production mode)..."
+      docker compose -f $ComposeFile --profile feeder rm -sf feeder 2>$null
+    }
+    Write-Info "Building images (no cache) and starting containers (database + app only) in detached mode..."
+    docker compose -f $ComposeFile build --no-cache
+    docker compose -f $ComposeFile up -d
+  }
+
   if ($LASTEXITCODE -eq 0) {
     Write-Info "Containers are booting. Use '.\ops.ps1 status' to check health."
   }
@@ -107,7 +123,7 @@ function Invoke-Feeder {
   switch ($SubAction.ToLower()) {
     "start" {
       Write-Header "Starting Heartbeat Feeder"
-      docker compose -f $ComposeFile up --build -d feeder
+      docker compose -f $ComposeFile --profile feeder up --build -d feeder
       if ($LASTEXITCODE -eq 0) {
         Write-Info "Feeder is running. Use '.\ops.ps1 logs -Filter feeder' to see heartbeats."
       }
@@ -122,7 +138,7 @@ function Invoke-Feeder {
     "restart" {
       Write-Header "Restarting Heartbeat Feeder"
       docker compose -f $ComposeFile stop feeder
-      docker compose -f $ComposeFile up --build -d feeder
+      docker compose -f $ComposeFile --profile feeder up --build -d feeder
     }
     "logs" {
       Write-Header "Heartbeat Feeder Logs"
@@ -388,6 +404,7 @@ Usage: .\ops.ps1 <subcommand> [options]
 Subcommands:
 
   start         Build images and boot the multi-container stack (detached).
+                Use 'start -Feeder' to also include the heartbeat simulator.
   stop          Gracefully stop containers and clean up networks.
   restart       Cycle the application (stop + start).
   status        Query runtime health of active containers.
@@ -403,6 +420,7 @@ Subcommands:
 
 Examples:
   .\ops.ps1 start
+  .\ops.ps1 start -Feeder
   .\ops.ps1 logs -Filter "api-01"
   .\ops.ps1 feeder start
   .\ops.ps1 feeder logs

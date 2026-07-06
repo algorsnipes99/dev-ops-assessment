@@ -3,9 +3,21 @@ echo ========================================
 echo  Fleet Health Monitor - Start
 echo ========================================
 echo.
-echo Building images and starting containers...
+echo   [1] Start without feeder (production mode)
+echo   [2] Start with heartbeat feeder (development)
 echo.
-powershell -ExecutionPolicy Bypass -Command "& '.\ops.ps1' start"
+choice /c 12 /n /m "Select option (1 or 2): "
+
+if %ERRORLEVEL% equ 1 (
+    echo.
+    echo Starting database + app only...
+    powershell -ExecutionPolicy Bypass -Command "& '.\ops.ps1' start"
+) else (
+    echo.
+    echo Starting database + app + heartbeat feeder...
+    powershell -ExecutionPolicy Bypass -Command "& '.\ops.ps1' start -Feeder"
+)
+
 if %ERRORLEVEL% equ 0 (
     echo.
     echo Done! Containers are booting.

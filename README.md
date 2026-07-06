@@ -19,7 +19,11 @@ cd dev-ops-assessment
 cp .env.example .env
 
 # 3. Start the stack (builds images, boots PostgreSQL + App)
+#    By default, only the database and app are started.
 ./ops.sh start
+
+#    To also run the heartbeat feeder simulator (development only):
+#    ./ops.sh start --feeder
 
 # 4. Verify both containers are healthy
 ./ops.sh status
@@ -91,14 +95,30 @@ See [vibe/API_REFERENCE.md](vibe/API_REFERENCE.md) for full schema and examples.
 
 ## Operations
 
+### Start Modes
+
+By default, `./ops.sh start` boots only the **database** and **app** services. This is the production-ready mode — no simulator traffic is generated.
+
+To include the heartbeat feeder simulator for development:
+
+| OS | Command |
+|---|---|
+| Linux/macOS/WSL | `./ops.sh start --feeder` |
+| Windows | `.\ops.ps1 start -Feeder` |
+
+> **Windows double-click:** Use `start.bat` for an interactive menu — pick production mode (DB + app) or development mode (with heartbeat simulator). No PowerShell knowledge needed.
+
 ### Linux / macOS / WSL (`ops.sh`)
 ```bash
-./ops.sh start             # Build and boot the stack
+./ops.sh start             # Build and boot the stack (database + app only)
+./ops.sh start --feeder    # Build and boot with heartbeat simulator
 ./ops.sh stop              # Gracefully shut down
 ./ops.sh restart           # Cycle the stack
 ./ops.sh status            # Container runtime health
 ./ops.sh logs              # Tail aggregated logs
 ./ops.sh logs --filter x   # Filter logs by host string
+./ops.sh feeder start      # Start feeder on an already-running stack
+./ops.sh feeder stop       # Stop the feeder
 ./ops.sh seed              # Inject synthetic telemetry data
 ./ops.sh snapshot          # Database backup via pg_dump
 ./ops.sh remote            # Remote diagnostic via SSH (dry-run without credentials)
@@ -106,12 +126,15 @@ See [vibe/API_REFERENCE.md](vibe/API_REFERENCE.md) for full schema and examples.
 
 ### Windows PowerShell (`ops.ps1`)
 ```powershell
-.\ops.ps1 start            # Build and boot the stack
+.\ops.ps1 start            # Build and boot the stack (database + app only)
+.\ops.ps1 start -Feeder    # Build and boot with heartbeat simulator
 .\ops.ps1 stop             # Gracefully shut down
 .\ops.ps1 restart          # Cycle the stack
 .\ops.ps1 status           # Container runtime health
 .\ops.ps1 logs             # Tail aggregated logs
 .\ops.ps1 logs -Filter x   # Filter logs by host string
+.\ops.ps1 feeder start     # Start feeder on an already-running stack
+.\ops.ps1 feeder stop      # Stop the feeder
 .\ops.ps1 seed             # Inject synthetic telemetry data
 .\ops.ps1 snapshot         # Database backup via pg_dump
 .\ops.ps1 remote           # Remote diagnostic via SSH (dry-run without credentials)

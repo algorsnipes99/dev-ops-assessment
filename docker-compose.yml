@@ -59,6 +59,7 @@ services:
 
   # --------------------------------------------------------------------------
   # Heartbeat Feeder (continuous telemetry simulator)
+  # Opt-in via --profile feeder (docker compose --profile feeder up)
   # --------------------------------------------------------------------------
   feeder:
     build:
@@ -66,6 +67,8 @@ services:
       dockerfile: Dockerfile.feeder
     container_name: fleet-feeder
     restart: unless-stopped
+    profiles:
+      - feeder
     environment:
       <<: *feeder-defaults
     depends_on:
